@@ -1,8 +1,9 @@
 from enum import Enum
-from typing import Dict
+import time
+from typing import Any, Dict, Iterable, List, Set
+
 import torch
 import torch.fx as fx
-from typing import Dict, Any
 
 
 class OP(str, Enum):
@@ -32,46 +33,198 @@ class NodeType(Enum):
 class GraphProfiler(fx.Interpreter):
     def __init__(self, module: fx.GraphModule, garbage_collect_values: bool = True):
         super().__init__(module, garbage_collect_values)
+        self.nodes: List[fx.Node] = list(self.module.graph.nodes)
+        self.node_to_idx: Dict[fx.Node, int] = {
+            node: idx for idx, node in enumerate(self.nodes)
+        }
 
-        # You should perform the static analysis of the graph here. In
-        # particular you might want to find the intermediate
-        # nodes/activations/feature_maps in the graph that will be defined as
-        # those nodes which are not parameters (not placeholder node types) but
-        # are created during the forward pass and are also used in the backward
-        # pass for computation.
+        self.sep_node = self._find_separator_node(backward=False)
+        self.sep_backward_node = self._find_separator_node(backward=True)
+        self.forward_end_idx = (
+            self.node_to_idx[self.sep_node]
+            if self.sep_node is not None
+            else len(self.nodes) - 1
+        )
+        self.backward_start_idx = (
+            self.node_to_idx[self.sep_backward_node]
+            if self.sep_backward_node is not None
+            else len(self.nodes)
+        )
 
-        # The boundary between the forward pass and backward pass can be
-        # identified by locating the node '%sep : [num_users=1] =
-        # call_function[target=torch.ops.separator.sep.default]' which will
-        # define the end of the forward pass. You will see the loss function
-        # after thsi operation and then you will encounter a node named,
-        # '%sep_backward : [num_users=1] =
-        # call_function[target=torch.ops.separator.sep_backward.default]'. This
-        # node marks the beginning of the backward pass.
+        self.optimizer_nodes = self._find_optimizer_nodes()
+        self.param_nodes: Set[fx.Node] = set()
+        self.grad_nodes: Set[fx.Node] = set()
+        for optimizer_node in self.optimizer_nodes:
+            if len(optimizer_node.args) > 0:
+                self.param_nodes.update(self._collect_nodes(optimizer_node.args[0]))
+            if len(optimizer_node.args) > 1:
+                self.grad_nodes.update(self._collect_nodes(optimizer_node.args[1]))
 
-        # For these intermediate nodes in the graph, you will record their last
-        # use in the forward pass and their first use in the backward pass.
+        self.param_placeholders = self._resolve_to_placeholders(self.param_nodes)
+        self.grad_placeholders = self._resolve_to_placeholders(self.grad_nodes)
+        self.grad_related_nodes = self._collect_ancestors(self.grad_nodes)
 
-        # The parameters of the models are the placeholder (input) nodes of the
-        # graph. Note that not all the placeholder nodes of the graph are
-        # parameters. The optimizer's states and the input mini-batch are also
-        # placeholder nodes that given as inputs to the graph.
+        if not self.param_placeholders:
+            # Fallback path for decomposed optimizer graphs where fused_adam is
+            # lowered into foreach/copy ops and explicit param lists are absent.
+            self.param_placeholders = self._infer_param_placeholders_from_mutations()
 
-        # The parameters and gradients of the model can be otained using the
-        # optimizer node's arguments. The optimizer node can be identified by
-        # the node '%_fused_adam : [num_users=3] =
-        # call_function[target=torch.ops.aten._fused_adam.default]'.
-        # The argument at position 0 is the list of parameter nodes, while the
-        # argument at position 1 is the list of gradient nodes.
+        self.activation_nodes: Set[fx.Node] = set()
+        self.last_forward_use: Dict[fx.Node, fx.Node] = {}
+        self.first_backward_use: Dict[fx.Node, fx.Node] = {}
+        self._analyze_activations()
 
-        # Printing the input nodes, node users and node names.
+        self.node_types: Dict[fx.Node, NodeType] = {}
+        for node in self.nodes:
+            self.node_types[node] = self._classify_node(node)
 
-        for node in self.module.graph.nodes:
-            print("Node name: ", node.name)
-            print("Node type: ", node.op)
-            print("Node target: ", node.target)
-            print("Input to this node", node.all_input_nodes)
-            print("Users of this node: ", node.users)
+        self._template_use_count: Dict[fx.Node, int] = {
+            node: len(node.users) for node in self.nodes
+        }
+
+        self.reset_stats()
+
+    def _target_str(self, node: fx.Node) -> str:
+        return str(node.target)
+
+    def _find_separator_node(self, backward: bool) -> fx.Node | None:
+        target_name = "separator.sep_backward.default" if backward else "separator.sep.default"
+        for node in self.nodes:
+            if node.op != OP.CALL_FUNCTION:
+                continue
+            if target_name in self._target_str(node):
+                return node
+        return None
+
+    def _find_optimizer_nodes(self) -> List[fx.Node]:
+        optimizer_nodes: List[fx.Node] = []
+        for node in self.nodes:
+            if node.op != OP.CALL_FUNCTION:
+                continue
+            if "fused_adam" in self._target_str(node):
+                optimizer_nodes.append(node)
+        return optimizer_nodes
+
+    def _collect_nodes(self, arg: Any) -> Set[fx.Node]:
+        nodes: Set[fx.Node] = set()
+        if isinstance(arg, fx.Node):
+            nodes.add(arg)
+            return nodes
+        if isinstance(arg, (list, tuple)):
+            for item in arg:
+                nodes.update(self._collect_nodes(item))
+            return nodes
+        if isinstance(arg, dict):
+            for value in arg.values():
+                nodes.update(self._collect_nodes(value))
+            return nodes
+        return nodes
+
+    def _resolve_to_placeholders(self, nodes: Iterable[fx.Node]) -> Set[fx.Node]:
+        placeholders: Set[fx.Node] = set()
+        queue: List[fx.Node] = list(nodes)
+        visited: Set[fx.Node] = set()
+        while queue:
+            cur = queue.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            if cur.op == OP.PLACEHOLDER:
+                placeholders.add(cur)
+                continue
+            queue.extend(cur.all_input_nodes)
+        return placeholders
+
+    def _collect_ancestors(self, nodes: Iterable[fx.Node]) -> Set[fx.Node]:
+        ancestors: Set[fx.Node] = set()
+        queue: List[fx.Node] = list(nodes)
+        while queue:
+            cur = queue.pop()
+            if cur in ancestors:
+                continue
+            ancestors.add(cur)
+            queue.extend(cur.all_input_nodes)
+        return ancestors
+
+    def _infer_param_placeholders_from_mutations(self) -> Set[fx.Node]:
+        mutable_placeholders: Set[fx.Node] = set()
+        for node in self.nodes:
+            if node.op != OP.CALL_FUNCTION:
+                continue
+            if "copy_" not in self._target_str(node):
+                continue
+            if not node.all_input_nodes:
+                continue
+            dst = node.all_input_nodes[0]
+            if dst.op == OP.PLACEHOLDER:
+                mutable_placeholders.add(dst)
+
+        inferred_params: Set[fx.Node] = set()
+        for placeholder in mutable_placeholders:
+            if any(self._is_forward_region(user) for user in placeholder.users):
+                inferred_params.add(placeholder)
+        return inferred_params
+
+    def _is_forward_region(self, node: fx.Node) -> bool:
+        return self.node_to_idx[node] <= self.forward_end_idx
+
+    def _is_backward_region(self, node: fx.Node) -> bool:
+        return self.node_to_idx[node] >= self.backward_start_idx
+
+    def _is_tensor_producing(self, node: fx.Node) -> bool:
+        return node.op not in [OP.OUTPUT]
+
+    def _analyze_activations(self) -> None:
+        for node in self.nodes:
+            if not self._is_forward_region(node):
+                continue
+            if node.op in [OP.PLACEHOLDER, OP.GET_ATTR, OP.OUTPUT]:
+                continue
+            if not self._is_tensor_producing(node):
+                continue
+            if self.sep_node is not None and node is self.sep_node:
+                continue
+
+            users = list(node.users.keys())
+            backward_users = [u for u in users if self._is_backward_region(u)]
+            if not backward_users:
+                continue
+
+            forward_users = [u for u in users if self._is_forward_region(u)]
+            self.activation_nodes.add(node)
+
+            if forward_users:
+                last_fwd = max(forward_users, key=lambda n: self.node_to_idx[n])
+            else:
+                last_fwd = node
+            first_bwd = min(backward_users, key=lambda n: self.node_to_idx[n])
+            self.last_forward_use[node] = last_fwd
+            self.first_backward_use[node] = first_bwd
+
+    def _classify_node(self, node: fx.Node) -> NodeType:
+        if node in self.activation_nodes:
+            return NodeType.ACT
+        if node.op == OP.PLACEHOLDER and node in self.param_placeholders:
+            return NodeType.PARAM
+        if node.op == OP.PLACEHOLDER and node in self.grad_placeholders:
+            return NodeType.GRAD
+        if node in self.param_nodes:
+            return NodeType.PARAM
+        if node in self.grad_related_nodes and self._is_backward_region(node):
+            return NodeType.GRAD
+        return NodeType.OTHER
+
+    def _tree_tensor_nbytes(self, value: Any) -> int:
+        if isinstance(value, torch.Tensor):
+            return value.nelement() * value.element_size()
+        if isinstance(value, (list, tuple)):
+            return sum(self._tree_tensor_nbytes(v) for v in value)
+        if isinstance(value, dict):
+            return sum(self._tree_tensor_nbytes(v) for v in value.values())
+        return 0
+
+    def _bytes_to_mib(self, nbytes: float) -> float:
+        return nbytes / (1024.0 * 1024.0)
 
     def run(
         self,
@@ -79,19 +232,94 @@ class GraphProfiler(fx.Interpreter):
         initial_env: Dict[fx.Node, Any] | None = None,
         enable_io_processing: bool = True
     ) -> Any:
-        return super().run(
+        self._remaining_uses: Dict[fx.Node, int] = dict(self._template_use_count)
+        self._live_node_bytes: Dict[fx.Node, int] = {}
+        self._live_node_type: Dict[fx.Node, NodeType] = {}
+        self._cur_peak_total_bytes = 0
+        self._cur_peak_by_type_bytes: Dict[NodeType, int] = {
+            node_type: 0 for node_type in NodeType
+        }
+        self._cur_torch_peak_bytes = 0
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+
+        result = super().run(
             *args, initial_env=initial_env, enable_io_processing=enable_io_processing
         )
+
+        self.peak_total_bytes_per_run.append(self._cur_peak_total_bytes)
+        for node_type in NodeType:
+            self.peak_by_type_bytes_per_run[node_type].append(
+                self._cur_peak_by_type_bytes[node_type]
+            )
+        self.torch_peak_bytes_per_run.append(self._cur_torch_peak_bytes)
+        return result
 
     def run_node(self, n: fx.Node) -> Any:
         # If you are in the backward pass region and one of the feature maps 'x'
         # was swapped out, and if node 'n' will use this feature map 'x' as one
         # of its inputs then you swap 'x' back to the GPU memory here.
+        use_cuda_timer = torch.cuda.is_available()
+        if use_cuda_timer:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            before_alloc = torch.cuda.memory_allocated()
+            start_event.record()
+        else:
+            before_alloc = 0
+            start_time = time.perf_counter()
 
         # you can start measuring the run-time of a node here
         result = super().run_node(n)
         # you can end measuring the run-time of a node here HINT: Use
         # torch.cuda.Events for doing time measurements of operations.
+        if use_cuda_timer:
+            end_event.record()
+            end_event.synchronize()
+            elapsed_ms = start_event.elapsed_time(end_event)
+            after_alloc = torch.cuda.memory_allocated()
+            mem_delta_bytes = after_alloc - before_alloc
+            self._cur_torch_peak_bytes = max(
+                self._cur_torch_peak_bytes, torch.cuda.max_memory_allocated()
+            )
+        else:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            mem_delta_bytes = 0
+
+        self.node_runtime_ms[n].append(elapsed_ms)
+        self.node_memory_delta_bytes[n].append(mem_delta_bytes)
+
+        output_bytes = self._tree_tensor_nbytes(result)
+        self.node_output_bytes[n] = max(self.node_output_bytes.get(n, 0), output_bytes)
+
+        if output_bytes > 0:
+            self._live_node_bytes[n] = output_bytes
+            self._live_node_type[n] = self.node_types.get(n, NodeType.OTHER)
+
+        for input_node in n.all_input_nodes:
+            if input_node not in self._remaining_uses:
+                continue
+            self._remaining_uses[input_node] -= 1
+            if self._remaining_uses[input_node] <= 0:
+                self._remaining_uses.pop(input_node, None)
+                self._live_node_bytes.pop(input_node, None)
+                self._live_node_type.pop(input_node, None)
+
+        live_total_bytes = sum(self._live_node_bytes.values())
+        if live_total_bytes > self._cur_peak_total_bytes:
+            self._cur_peak_total_bytes = live_total_bytes
+
+        live_by_type_bytes: Dict[NodeType, int] = {node_type: 0 for node_type in NodeType}
+        for live_node, nbytes in self._live_node_bytes.items():
+            node_type = self._live_node_type.get(
+                live_node, self.node_types.get(live_node, NodeType.OTHER)
+            )
+            live_by_type_bytes[node_type] += nbytes
+        for node_type in NodeType:
+            if live_by_type_bytes[node_type] > self._cur_peak_by_type_bytes[node_type]:
+                self._cur_peak_by_type_bytes[node_type] = live_by_type_bytes[node_type]
 
         # If you are in the forward pass region and if the current node 'n' is
         # the last user of a feature map 'x', then it should be swapped out to
@@ -103,12 +331,108 @@ class GraphProfiler(fx.Interpreter):
         # You are expected run the profiler for x warm-up iterations and y
         # actual measurement iterations. The run-time measurement then needs to
         # be averaged over the y runs.
-        pass
+        self.avg_runtime_ms: Dict[fx.Node, float] = {}
+        self.avg_memory_delta_bytes: Dict[fx.Node, float] = {}
+        self.avg_output_bytes: Dict[fx.Node, int] = dict(self.node_output_bytes)
+        for node in self.nodes:
+            runtime_samples = self.node_runtime_ms.get(node, [])
+            mem_samples = self.node_memory_delta_bytes.get(node, [])
+            self.avg_runtime_ms[node] = (
+                sum(runtime_samples) / len(runtime_samples) if runtime_samples else 0.0
+            )
+            self.avg_memory_delta_bytes[node] = (
+                sum(mem_samples) / len(mem_samples) if mem_samples else 0.0
+            )
+
+        self.avg_peak_total_bytes = (
+            sum(self.peak_total_bytes_per_run) / len(self.peak_total_bytes_per_run)
+            if self.peak_total_bytes_per_run
+            else 0.0
+        )
+        self.avg_peak_by_type_bytes: Dict[NodeType, float] = {}
+        for node_type in NodeType:
+            samples = self.peak_by_type_bytes_per_run[node_type]
+            self.avg_peak_by_type_bytes[node_type] = (
+                sum(samples) / len(samples) if samples else 0.0
+            )
+        self.avg_torch_peak_bytes = (
+            sum(self.torch_peak_bytes_per_run) / len(self.torch_peak_bytes_per_run)
+            if self.torch_peak_bytes_per_run
+            else 0.0
+        )
 
     def print_stats(self) -> None:
-        pass
+        print("\n=== Graph Profiler Summary ===")
+        print(f"Total graph nodes: {len(self.nodes)}")
+        print(
+            "Forward/Backward boundary: "
+            f"forward_end_idx={self.forward_end_idx}, "
+            f"backward_start_idx={self.backward_start_idx}"
+        )
+        print(f"Parameters detected: {len(self.param_placeholders)} placeholders")
+        print(f"Gradients detected: {len(self.grad_placeholders)} placeholders")
+        print(f"Activations detected: {len(self.activation_nodes)}")
+
+        if self.activation_nodes:
+            print("\nActivation lifetime analysis (first 20 by size):")
+            activation_rank = sorted(
+                self.activation_nodes,
+                key=lambda n: self.avg_output_bytes.get(n, 0),
+                reverse=True,
+            )
+            for node in activation_rank[:20]:
+                last_fwd = self.last_forward_use[node]
+                first_bwd = self.first_backward_use[node]
+                print(
+                    "  "
+                    f"{node.name:<36} size={self._bytes_to_mib(self.avg_output_bytes.get(node, 0)):.3f} MiB "
+                    f"last_fwd={last_fwd.name:<24} first_bwd={first_bwd.name}"
+                )
+
+        print("\nTop operators by average runtime (first 30):")
+        ranked_nodes = sorted(
+            self.nodes,
+            key=lambda n: self.avg_runtime_ms.get(n, 0.0),
+            reverse=True,
+        )
+        for node in ranked_nodes[:30]:
+            node_type = self.node_types.get(node, NodeType.OTHER).name
+            print(
+                "  "
+                f"{node.name:<36} op={node.op:<14} type={node_type:<6} "
+                f"time={self.avg_runtime_ms.get(node, 0.0):8.4f} ms "
+                f"out={self._bytes_to_mib(self.avg_output_bytes.get(node, 0)):8.3f} MiB "
+                f"delta={self._bytes_to_mib(self.avg_memory_delta_bytes.get(node, 0.0)):8.3f} MiB"
+            )
+
+        print("\nPeak memory breakdown (live tensor model):")
+        print(f"  total: {self._bytes_to_mib(self.avg_peak_total_bytes):.3f} MiB")
+        for node_type in NodeType:
+            print(
+                "  "
+                f"{node_type.name:<8}: "
+                f"{self._bytes_to_mib(self.avg_peak_by_type_bytes[node_type]):.3f} MiB"
+            )
+
+        if torch.cuda.is_available():
+            print(
+                "Peak memory observed by torch.cuda.max_memory_allocated: "
+                f"{self._bytes_to_mib(self.avg_torch_peak_bytes):.3f} MiB"
+            )
 
     def reset_stats(self) -> None:
         # The statistics must be cleared out after x warm-up iterations and
         # reset before the actual measurement begins.
-        pass
+        self.node_runtime_ms: Dict[fx.Node, List[float]] = {
+            node: [] for node in self.nodes
+        }
+        self.node_memory_delta_bytes: Dict[fx.Node, List[int]] = {
+            node: [] for node in self.nodes
+        }
+        self.node_output_bytes: Dict[fx.Node, int] = {node: 0 for node in self.nodes}
+
+        self.peak_total_bytes_per_run: List[int] = []
+        self.peak_by_type_bytes_per_run: Dict[NodeType, List[int]] = {
+            node_type: [] for node_type in NodeType
+        }
+        self.torch_peak_bytes_per_run: List[int] = []

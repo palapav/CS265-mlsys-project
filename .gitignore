@@ -2,7 +2,11 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.sh
+PROBLEM.md
+*.json
+MIDWAY_CHECKIN.md
+*.png
 # C extensions
 *.so
 
