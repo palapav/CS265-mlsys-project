@@ -23,7 +23,8 @@ class NodeType(Enum):
     PARAM = 0
     ACT = 1
     GRAD = 2
-    OTHER = 3
+    OPT_STATE = 3
+    OTHER = 4
 
 
 # This is an example graph_profiler that extends the fx.Interpreter class, it
@@ -31,12 +32,18 @@ class NodeType(Enum):
 
 
 class GraphProfiler(fx.Interpreter):
-    def __init__(self, module: fx.GraphModule, garbage_collect_values: bool = True):
+    def __init__(
+        self,
+        module: fx.GraphModule,
+        garbage_collect_values: bool = True,
+        placeholder_node_types: Dict[fx.Node, NodeType] | None = None,
+    ):
         super().__init__(module, garbage_collect_values)
         self.nodes: List[fx.Node] = list(self.module.graph.nodes)
         self.node_to_idx: Dict[fx.Node, int] = {
             node: idx for idx, node in enumerate(self.nodes)
         }
+        self.placeholder_node_types = placeholder_node_types or {}
 
         self.sep_node = self._find_separator_node(backward=False)
         self.sep_backward_node = self._find_separator_node(backward=True)
@@ -50,24 +57,64 @@ class GraphProfiler(fx.Interpreter):
             if self.sep_backward_node is not None
             else len(self.nodes)
         )
+        self.optimizer_start_idx = self._find_optimizer_start_idx()
 
         self.optimizer_nodes = self._find_optimizer_nodes()
         self.param_nodes: Set[fx.Node] = set()
         self.grad_nodes: Set[fx.Node] = set()
-        for optimizer_node in self.optimizer_nodes:
-            if len(optimizer_node.args) > 0:
-                self.param_nodes.update(self._collect_nodes(optimizer_node.args[0]))
-            if len(optimizer_node.args) > 1:
-                self.grad_nodes.update(self._collect_nodes(optimizer_node.args[1]))
+        self.param_placeholders: Set[fx.Node] = set()
+        self.grad_placeholders: Set[fx.Node] = set()
+        self.opt_state_placeholders: Set[fx.Node] = set()
 
-        self.param_placeholders = self._resolve_to_placeholders(self.param_nodes)
-        self.grad_placeholders = self._resolve_to_placeholders(self.grad_nodes)
+        if self.placeholder_node_types:
+            for placeholder, node_type in self.placeholder_node_types.items():
+                if placeholder.op != OP.PLACEHOLDER:
+                    continue
+                if node_type == NodeType.PARAM:
+                    self.param_placeholders.add(placeholder)
+                elif node_type == NodeType.GRAD:
+                    self.grad_placeholders.add(placeholder)
+                elif node_type == NodeType.OPT_STATE:
+                    self.opt_state_placeholders.add(placeholder)
+        else:
+            for optimizer_node in self.optimizer_nodes:
+                if len(optimizer_node.args) > 0:
+                    self.param_nodes.update(self._collect_nodes(optimizer_node.args[0]))
+                if len(optimizer_node.args) > 1:
+                    self.grad_nodes.update(self._collect_nodes(optimizer_node.args[1]))
+
+            self.param_placeholders = self._resolve_to_placeholders(self.param_nodes)
+            self.grad_placeholders = self._resolve_to_placeholders(self.grad_nodes)
+            if not self.param_placeholders:
+                # Fallback path for decomposed optimizer graphs where fused_adam is
+                # lowered into foreach/copy ops and explicit param lists are absent.
+                self.param_placeholders = self._infer_param_placeholders_from_mutations()
+
         self.grad_related_nodes = self._collect_ancestors(self.grad_nodes)
 
-        if not self.param_placeholders:
-            # Fallback path for decomposed optimizer graphs where fused_adam is
-            # lowered into foreach/copy ops and explicit param lists are absent.
-            self.param_placeholders = self._infer_param_placeholders_from_mutations()
+        self.optimizer_state_update_nodes: Set[fx.Node] = set()
+        self.param_update_nodes: Set[fx.Node] = set()
+        optimizer_update_src_for_state: Set[fx.Node] = set()
+        optimizer_update_src_for_param: Set[fx.Node] = set()
+        for node in self.nodes:
+            if not self._is_optimizer_region(node):
+                continue
+            if node.op != OP.CALL_FUNCTION or "copy_" not in self._target_str(node):
+                continue
+            if len(node.all_input_nodes) < 2:
+                continue
+            dst = node.all_input_nodes[0]
+            src = node.all_input_nodes[1]
+            if dst in self.opt_state_placeholders:
+                self.optimizer_state_update_nodes.add(node)
+                optimizer_update_src_for_state.add(src)
+            elif dst in self.param_placeholders:
+                self.param_update_nodes.add(node)
+                optimizer_update_src_for_param.add(src)
+        self.optimizer_state_update_ancestors = self._collect_ancestors(
+            optimizer_update_src_for_state
+        )
+        self.param_update_ancestors = self._collect_ancestors(optimizer_update_src_for_param)
 
         self.activation_nodes: Set[fx.Node] = set()
         self.last_forward_use: Dict[fx.Node, fx.Node] = {}
@@ -101,9 +148,23 @@ class GraphProfiler(fx.Interpreter):
         for node in self.nodes:
             if node.op != OP.CALL_FUNCTION:
                 continue
-            if "fused_adam" in self._target_str(node):
+            if self.node_to_idx[node] < self.backward_start_idx:
+                continue
+            target = self._target_str(node)
+            if "fused_adam" in target or "_foreach" in target or "copy_" in target:
                 optimizer_nodes.append(node)
         return optimizer_nodes
+
+    def _find_optimizer_start_idx(self) -> int:
+        for node in self.nodes:
+            if self.node_to_idx[node] < self.backward_start_idx:
+                continue
+            if node.op != OP.CALL_FUNCTION:
+                continue
+            target = self._target_str(node)
+            if "fused_adam" in target or "_foreach" in target or "copy_" in target:
+                return self.node_to_idx[node]
+        return len(self.nodes)
 
     def _collect_nodes(self, arg: Any) -> Set[fx.Node]:
         nodes: Set[fx.Node] = set()
@@ -171,6 +232,13 @@ class GraphProfiler(fx.Interpreter):
     def _is_backward_region(self, node: fx.Node) -> bool:
         return self.node_to_idx[node] >= self.backward_start_idx
 
+    def _is_backward_compute_region(self, node: fx.Node) -> bool:
+        idx = self.node_to_idx[node]
+        return self.backward_start_idx <= idx < self.optimizer_start_idx
+
+    def _is_optimizer_region(self, node: fx.Node) -> bool:
+        return self.node_to_idx[node] >= self.optimizer_start_idx
+
     def _is_tensor_producing(self, node: fx.Node) -> bool:
         return node.op not in [OP.OUTPUT]
 
@@ -206,25 +274,49 @@ class GraphProfiler(fx.Interpreter):
             return NodeType.ACT
         if node.op == OP.PLACEHOLDER and node in self.param_placeholders:
             return NodeType.PARAM
+        if node.op == OP.PLACEHOLDER and node in self.opt_state_placeholders:
+            return NodeType.OPT_STATE
         if node.op == OP.PLACEHOLDER and node in self.grad_placeholders:
             return NodeType.GRAD
         if node in self.param_nodes:
             return NodeType.PARAM
+        if node in self.optimizer_state_update_nodes:
+            return NodeType.OPT_STATE
+        if node in self.param_update_nodes:
+            return NodeType.PARAM
+        if self._is_backward_compute_region(node):
+            return NodeType.GRAD
         if node in self.grad_related_nodes and self._is_backward_region(node):
             return NodeType.GRAD
         return NodeType.OTHER
 
     def _tree_tensor_nbytes(self, value: Any) -> int:
-        if isinstance(value, torch.Tensor):
-            return value.nelement() * value.element_size()
-        if isinstance(value, (list, tuple)):
-            return sum(self._tree_tensor_nbytes(v) for v in value)
-        if isinstance(value, dict):
-            return sum(self._tree_tensor_nbytes(v) for v in value.values())
-        return 0
+        # De-duplicate aliases within one output tree to avoid counting the same
+        # tensor storage multiple times (common with tuple/list outputs).
+        seen_ptrs: Set[int] = set()
+
+        def _inner(v: Any) -> int:
+            if isinstance(v, torch.Tensor):
+                ptr = v.data_ptr()
+                if ptr == 0 or ptr in seen_ptrs:
+                    return 0
+                seen_ptrs.add(ptr)
+                return v.nelement() * v.element_size()
+            if isinstance(v, (list, tuple)):
+                return sum(_inner(x) for x in v)
+            if isinstance(v, dict):
+                return sum(_inner(x) for x in v.values())
+            return 0
+
+        return _inner(value)
 
     def _bytes_to_mib(self, nbytes: float) -> float:
         return nbytes / (1024.0 * 1024.0)
+
+    def _is_inplace_update_node(self, node: fx.Node) -> bool:
+        if node.op not in [OP.CALL_FUNCTION, OP.CALL_METHOD]:
+            return False
+        return "copy_" in self._target_str(node)
 
     def run(
         self,
@@ -236,6 +328,9 @@ class GraphProfiler(fx.Interpreter):
         self._live_node_bytes: Dict[fx.Node, int] = {}
         self._live_node_type: Dict[fx.Node, NodeType] = {}
         self._cur_peak_total_bytes = 0
+        self._cur_peak_total_composition_by_type_bytes: Dict[NodeType, int] = {
+            node_type: 0 for node_type in NodeType
+        }
         self._cur_peak_by_type_bytes: Dict[NodeType, int] = {
             node_type: 0 for node_type in NodeType
         }
@@ -251,6 +346,9 @@ class GraphProfiler(fx.Interpreter):
 
         self.peak_total_bytes_per_run.append(self._cur_peak_total_bytes)
         for node_type in NodeType:
+            self.peak_total_composition_by_type_bytes_per_run[node_type].append(
+                self._cur_peak_total_composition_by_type_bytes[node_type]
+            )
             self.peak_by_type_bytes_per_run[node_type].append(
                 self._cur_peak_by_type_bytes[node_type]
             )
@@ -291,7 +389,9 @@ class GraphProfiler(fx.Interpreter):
         self.node_runtime_ms[n].append(elapsed_ms)
         self.node_memory_delta_bytes[n].append(mem_delta_bytes)
 
-        output_bytes = self._tree_tensor_nbytes(result)
+        output_bytes = 0
+        if self._is_tensor_producing(n) and not self._is_inplace_update_node(n):
+            output_bytes = self._tree_tensor_nbytes(result)
         self.node_output_bytes[n] = max(self.node_output_bytes.get(n, 0), output_bytes)
 
         if output_bytes > 0:
@@ -307,16 +407,16 @@ class GraphProfiler(fx.Interpreter):
                 self._live_node_bytes.pop(input_node, None)
                 self._live_node_type.pop(input_node, None)
 
-        live_total_bytes = sum(self._live_node_bytes.values())
-        if live_total_bytes > self._cur_peak_total_bytes:
-            self._cur_peak_total_bytes = live_total_bytes
-
         live_by_type_bytes: Dict[NodeType, int] = {node_type: 0 for node_type in NodeType}
         for live_node, nbytes in self._live_node_bytes.items():
             node_type = self._live_node_type.get(
                 live_node, self.node_types.get(live_node, NodeType.OTHER)
             )
             live_by_type_bytes[node_type] += nbytes
+        live_total_bytes = sum(live_by_type_bytes.values())
+        if live_total_bytes > self._cur_peak_total_bytes:
+            self._cur_peak_total_bytes = live_total_bytes
+            self._cur_peak_total_composition_by_type_bytes = dict(live_by_type_bytes)
         for node_type in NodeType:
             if live_by_type_bytes[node_type] > self._cur_peak_by_type_bytes[node_type]:
                 self._cur_peak_by_type_bytes[node_type] = live_by_type_bytes[node_type]
@@ -350,10 +450,17 @@ class GraphProfiler(fx.Interpreter):
             else 0.0
         )
         self.avg_peak_by_type_bytes: Dict[NodeType, float] = {}
+        self.avg_max_by_type_bytes: Dict[NodeType, float] = {}
         for node_type in NodeType:
-            samples = self.peak_by_type_bytes_per_run[node_type]
+            composition_samples = self.peak_total_composition_by_type_bytes_per_run[node_type]
+            max_samples = self.peak_by_type_bytes_per_run[node_type]
             self.avg_peak_by_type_bytes[node_type] = (
-                sum(samples) / len(samples) if samples else 0.0
+                sum(composition_samples) / len(composition_samples)
+                if composition_samples
+                else 0.0
+            )
+            self.avg_max_by_type_bytes[node_type] = (
+                sum(max_samples) / len(max_samples) if max_samples else 0.0
             )
         self.avg_torch_peak_bytes = (
             sum(self.torch_peak_bytes_per_run) / len(self.torch_peak_bytes_per_run)
@@ -367,9 +474,11 @@ class GraphProfiler(fx.Interpreter):
         print(
             "Forward/Backward boundary: "
             f"forward_end_idx={self.forward_end_idx}, "
-            f"backward_start_idx={self.backward_start_idx}"
+            f"backward_start_idx={self.backward_start_idx}, "
+            f"optimizer_start_idx={self.optimizer_start_idx}"
         )
         print(f"Parameters detected: {len(self.param_placeholders)} placeholders")
+        print(f"Optimizer states detected: {len(self.opt_state_placeholders)} placeholders")
         print(f"Gradients detected: {len(self.grad_placeholders)} placeholders")
         print(f"Activations detected: {len(self.activation_nodes)}")
 
@@ -405,13 +514,23 @@ class GraphProfiler(fx.Interpreter):
                 f"delta={self._bytes_to_mib(self.avg_memory_delta_bytes.get(node, 0.0)):8.3f} MiB"
             )
 
-        print("\nPeak memory breakdown (live tensor model):")
+        print("\nPeak memory breakdown at total live-memory peak (live tensor model):")
         print(f"  total: {self._bytes_to_mib(self.avg_peak_total_bytes):.3f} MiB")
         for node_type in NodeType:
             print(
                 "  "
                 f"{node_type.name:<8}: "
                 f"{self._bytes_to_mib(self.avg_peak_by_type_bytes[node_type]):.3f} MiB"
+            )
+        print(
+            "\nPer-category maxima over iteration "
+            "(sum can exceed total because peaks happen at different times):"
+        )
+        for node_type in NodeType:
+            print(
+                "  "
+                f"{node_type.name:<8}: "
+                f"{self._bytes_to_mib(self.avg_max_by_type_bytes[node_type]):.3f} MiB"
             )
 
         if torch.cuda.is_available():
@@ -432,6 +551,9 @@ class GraphProfiler(fx.Interpreter):
         self.node_output_bytes: Dict[fx.Node, int] = {node: 0 for node in self.nodes}
 
         self.peak_total_bytes_per_run: List[int] = []
+        self.peak_total_composition_by_type_bytes_per_run: Dict[NodeType, List[int]] = {
+            node_type: [] for node_type in NodeType
+        }
         self.peak_by_type_bytes_per_run: Dict[NodeType, List[int]] = {
             node_type: [] for node_type in NodeType
         }

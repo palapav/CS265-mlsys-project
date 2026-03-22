@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
@@ -30,6 +31,60 @@ def _init_optimizer_states(model: torch.nn.Module, optimizer: torch.optim.Optimi
     optimizer.zero_grad()
 
 
+def _collect_optimizer_state_ptrs(optimizer: torch.optim.Optimizer) -> set[int]:
+    ptrs: set[int] = set()
+    for state in optimizer.state.values():
+        for value in state.values():
+            if isinstance(value, torch.Tensor):
+                ptrs.add(value.data_ptr())
+    return ptrs
+
+
+def _infer_placeholder_node_types(
+    gm: torch.fx.GraphModule,
+    args: Any,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> Dict[torch.fx.Node, NodeType]:
+    placeholders = [node for node in gm.graph.nodes if node.op == "placeholder"]
+    placeholder_types: Dict[torch.fx.Node, NodeType] = {}
+    if len(placeholders) > len(args):
+        return placeholder_types
+
+    param_ptrs = {param.data_ptr() for param in model.parameters()}
+    opt_state_ptrs = _collect_optimizer_state_ptrs(optimizer)
+
+    for idx, placeholder in enumerate(placeholders):
+        value = args[idx]
+        if not isinstance(value, torch.Tensor):
+            continue
+        ptr = value.data_ptr()
+        if ptr in param_ptrs:
+            placeholder_types[placeholder] = NodeType.PARAM
+        elif ptr in opt_state_ptrs:
+            placeholder_types[placeholder] = NodeType.OPT_STATE
+    return placeholder_types
+
+
+def _trace_window(profiler: GraphProfiler, center_idx: int, radius: int = 4) -> List[Dict[str, Any]]:
+    if center_idx < 0 or center_idx >= len(profiler.nodes):
+        return []
+    start = max(0, center_idx - radius)
+    end = min(len(profiler.nodes), center_idx + radius + 1)
+    trace: List[Dict[str, Any]] = []
+    for idx in range(start, end):
+        node = profiler.nodes[idx]
+        trace.append(
+            {
+                "idx": idx,
+                "name": node.name,
+                "op": str(node.op),
+                "target": str(node.target),
+            }
+        )
+    return trace
+
+
 def _run_profiled_iteration(
     train_step_fn: Any,
     model: torch.nn.Module,
@@ -41,7 +96,8 @@ def _run_profiled_iteration(
     summary: Dict[str, Any] = {}
 
     def graph_transformation(gm: torch.fx.GraphModule, args: Any) -> torch.fx.GraphModule:
-        profiler = GraphProfiler(gm)
+        placeholder_node_types = _infer_placeholder_node_types(gm, args, model, optimizer)
+        profiler = GraphProfiler(gm, placeholder_node_types=placeholder_node_types)
         with torch.no_grad():
             for _ in range(warmup_iters):
                 profiler.run(*args)
@@ -49,6 +105,14 @@ def _run_profiled_iteration(
             for _ in range(profile_iters):
                 profiler.run(*args)
         profiler.aggregate_stats()
+
+        node_type_counts = Counter(profiler.node_types.values())
+        num_placeholders = sum(1 for node in profiler.nodes if node.op == "placeholder")
+        categorized_placeholders = (
+            len(profiler.param_placeholders)
+            + len(profiler.grad_placeholders)
+            + len(profiler.opt_state_placeholders)
+        )
 
         top_runtime_nodes = sorted(
             profiler.nodes, key=lambda n: profiler.avg_runtime_ms.get(n, 0.0), reverse=True
@@ -65,6 +129,20 @@ def _run_profiled_iteration(
                 "num_activations": len(profiler.activation_nodes),
                 "peak_live_mib": _to_mib(profiler.avg_peak_total_bytes),
                 "peak_cuda_mib": _to_mib(profiler.avg_torch_peak_bytes),
+                "node_type_counts": {
+                    "param": node_type_counts.get(NodeType.PARAM, 0),
+                    "act": node_type_counts.get(NodeType.ACT, 0),
+                    "grad": node_type_counts.get(NodeType.GRAD, 0),
+                    "opt_state": node_type_counts.get(NodeType.OPT_STATE, 0),
+                    "other": node_type_counts.get(NodeType.OTHER, 0),
+                },
+                "placeholder_role_counts": {
+                    "param": len(profiler.param_placeholders),
+                    "grad": len(profiler.grad_placeholders),
+                    "opt_state": len(profiler.opt_state_placeholders),
+                    "other": max(0, num_placeholders - categorized_placeholders),
+                    "total": num_placeholders,
+                },
                 "peak_breakdown_live_mib": {
                     "param": _to_mib(
                         profiler.avg_peak_by_type_bytes.get(NodeType.PARAM, 0.0)
@@ -75,8 +153,58 @@ def _run_profiled_iteration(
                     "grad": _to_mib(
                         profiler.avg_peak_by_type_bytes.get(NodeType.GRAD, 0.0)
                     ),
+                    "opt_state": _to_mib(
+                        profiler.avg_peak_by_type_bytes.get(NodeType.OPT_STATE, 0.0)
+                    ),
                     "other": _to_mib(
                         profiler.avg_peak_by_type_bytes.get(NodeType.OTHER, 0.0)
+                    ),
+                },
+                "peak_category_max_live_mib": {
+                    "param": _to_mib(
+                        profiler.avg_max_by_type_bytes.get(NodeType.PARAM, 0.0)
+                    ),
+                    "act": _to_mib(
+                        profiler.avg_max_by_type_bytes.get(NodeType.ACT, 0.0)
+                    ),
+                    "grad": _to_mib(
+                        profiler.avg_max_by_type_bytes.get(NodeType.GRAD, 0.0)
+                    ),
+                    "opt_state": _to_mib(
+                        profiler.avg_max_by_type_bytes.get(NodeType.OPT_STATE, 0.0)
+                    ),
+                    "other": _to_mib(
+                        profiler.avg_max_by_type_bytes.get(NodeType.OTHER, 0.0)
+                    ),
+                },
+                "graph_evidence": {
+                    "separator_validation": {
+                        "forward_separator_found": profiler.sep_node is not None,
+                        "backward_separator_found": profiler.sep_backward_node is not None,
+                        "forward_before_backward": profiler.forward_end_idx
+                        < profiler.backward_start_idx,
+                        "optimizer_after_backward": profiler.optimizer_start_idx
+                        >= profiler.backward_start_idx,
+                    },
+                    "boundary_indices": {
+                        "forward_end_idx": profiler.forward_end_idx,
+                        "backward_start_idx": profiler.backward_start_idx,
+                        "optimizer_start_idx": profiler.optimizer_start_idx,
+                    },
+                    "region_node_counts": {
+                        "forward_region_nodes": profiler.forward_end_idx + 1,
+                        "backward_compute_nodes": max(
+                            0, profiler.optimizer_start_idx - profiler.backward_start_idx
+                        ),
+                        "optimizer_region_nodes": max(
+                            0, len(profiler.nodes) - profiler.optimizer_start_idx
+                        ),
+                    },
+                    "separator_trace_window": _trace_window(
+                        profiler, profiler.backward_start_idx
+                    ),
+                    "optimizer_trace_window": _trace_window(
+                        profiler, profiler.optimizer_start_idx
                     ),
                 },
                 "top_runtime_ops": [
@@ -188,6 +316,88 @@ def _plot_peak_memory(results: Dict[str, List[Dict[str, Any]]], out_path: str) -
     plt.close(fig)
 
 
+def _plot_peak_breakdown_at_peak(
+    results: Dict[str, List[Dict[str, Any]]], out_path: str
+) -> None:
+    categories = [
+        ("param", "PARAM"),
+        ("act", "ACT"),
+        ("grad", "GRAD"),
+        ("opt_state", "OPT_STATE"),
+        ("other", "OTHER"),
+    ]
+    colors = {
+        "param": "#4C78A8",
+        "act": "#F58518",
+        "grad": "#E45756",
+        "opt_state": "#72B7B2",
+        "other": "#54A24B",
+    }
+    model_order = ["ResNet-152", "BERT-Base"]
+    baseline_entries: Dict[str, Dict[str, Any]] = {}
+    for model_name in model_order:
+        model_results = results.get(model_name, [])
+        if not model_results:
+            continue
+        baseline_entries[model_name] = min(model_results, key=lambda x: x["batch_size"])
+
+    if not baseline_entries:
+        return
+
+    labels = []
+    totals = []
+    for model_name in model_order:
+        if model_name not in baseline_entries:
+            continue
+        entry = baseline_entries[model_name]
+        labels.append(f"{model_name}\n(batch={entry['batch_size']})")
+        totals.append(entry["profile"]["peak_live_mib"])
+
+    x = list(range(len(labels)))
+    bottoms = [0.0 for _ in labels]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4), dpi=160)
+    for key, pretty_name in categories:
+        values = []
+        for model_name in model_order:
+            if model_name not in baseline_entries:
+                continue
+            values.append(
+                baseline_entries[model_name]["profile"]["peak_breakdown_live_mib"].get(
+                    key, 0.0
+                )
+            )
+        ax.bar(
+            x,
+            values,
+            width=0.6,
+            bottom=bottoms,
+            label=pretty_name,
+            color=colors[key],
+        )
+        bottoms = [b + v for b, v in zip(bottoms, values)]
+
+    for idx, total in enumerate(totals):
+        ax.text(
+            idx,
+            total + max(totals) * 0.015,
+            f"{total:.1f} MiB",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Live memory (MiB)")
+    ax.set_title("Peak Live-Memory Breakdown at Total Peak (w/o AC)")
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(ncols=3, fontsize=8)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
 def run_midway_checkin() -> Dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this project experiment.")
@@ -239,10 +449,15 @@ if __name__ == "__main__":
     results = run_midway_checkin()
     json_path = "midway_results_wo_ac.json"
     plot_path = "midway_peak_memory_wo_ac.png"
+    breakdown_plot_path = "midway_peak_breakdown_at_peak_wo_ac.png"
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
     _plot_peak_memory(results["deliverable_4a_without_ac"]["results"], plot_path)
+    _plot_peak_breakdown_at_peak(
+        results["deliverable_4a_without_ac"]["results"], breakdown_plot_path
+    )
     print(f"Wrote: {json_path}")
     print(f"Wrote: {plot_path}")
+    print(f"Wrote: {breakdown_plot_path}")
