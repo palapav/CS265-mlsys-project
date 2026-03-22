@@ -3,13 +3,14 @@ CS265 Systems Project: Activation Checkpointing (w/o AC Baseline)
 
 ### Aditya Palaparthi
 ### GitHub Repo Link: https://github.com/palapav/CS265-mlsys-project
-
+### Results: https://github.com/palapav/CS265-mlsys-project/tree/main/results/midway
 ---
 
 ## 1. Introduction
 
 This midway check-in completes **Phase 1 (Graph Profiler)** and reports the required **w/o AC** baseline experiments from `PROBLEM.md` deliverables **4(a)** and **4(b)**. The implementation in `graph_prof.py` profiles a full training iteration graph (forward + backward + optimizer), computes per-node runtime/memory statistics, performs static activation lifetime analysis (last forward use and first backward use), and produces peak-memory summaries. Experiments are automated in `midway_checkin.py` for `ResNet-152` and `BERT-Base`, with raw outputs in `midway_results_wo_ac.json`, the peak-memory-vs-batch graph in `midway_peak_memory_wo_ac.png`, and a dedicated category-breakdown graph at peak in `midway_peak_breakdown_at_peak_wo_ac.png`.
 
+Phase 1 builds the profiler needed to drive later activation-checkpointing decisions.
 ---
 
 ## 2. Problems Tackled
@@ -173,7 +174,7 @@ idx 2876: aten._foreach_add.Scalar   (optimizer starts)
 ```
 
 Raw experiment artifact (full JSON):
-- [`midway_results_wo_ac.json`](midway_results_wo_ac.json)
+- [`midway_results_wo_ac.json`](https://github.com/palapav/CS265-mlsys-project/blob/main/results/midway/midway_results_wo_ac.json)
 
 Preview excerpt from `midway_results_wo_ac.json`:
 
@@ -256,3 +257,6 @@ Interpretation:
 - Peak-memory reporting needs two views (composition at total peak vs per-category maxima) to avoid misleading interpretations.
 - Reducing profiling noise with short runs (`2` profile iterations) without making experimentation prohibitively slow.
 - Preparing for Phase 2/3 integration: using static activation lifetime data to drive recomputation decisions and graph rewrites while maintaining gradient correctness.
+
+## 5. Conclusion
+Midway requirements are complete; next steps are the μ-TWO checkpoint-selection algorithm and graph rewriting.
