@@ -1,4 +1,5 @@
 import json
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
@@ -11,6 +12,8 @@ from transformers import BertConfig, BertForMaskedLM
 
 from graph_prof import GraphProfiler, NodeType
 from graph_tracer import SEPFunction, compile
+
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "midway")
 
 
 @dataclass
@@ -83,6 +86,27 @@ def _trace_window(profiler: GraphProfiler, center_idx: int, radius: int = 4) -> 
             }
         )
     return trace
+
+
+def _validate_profile_summary(model_name: str, batch_size: int, summary: Dict[str, Any]) -> None:
+    """Assert the live-tensor memory model is internally consistent and bounded
+    above by the CUDA allocator peak. Raises AssertionError on violation so
+    bugs in the profiler surface immediately rather than reaching figures."""
+    peak_live = summary["peak_live_mib"]
+    peak_cuda = summary["peak_cuda_mib"]
+    breakdown = summary["peak_breakdown_live_mib"]
+    breakdown_sum = sum(breakdown.values())
+    tag = f"{model_name} batch={batch_size}"
+
+    assert peak_live >= 0, f"{tag}: peak_live_mib should be non-negative, got {peak_live}"
+    assert abs(breakdown_sum - peak_live) <= max(1.0, 1e-3 * peak_live), (
+        f"{tag}: peak_breakdown_live_mib sum {breakdown_sum:.3f} MiB does not match "
+        f"peak_live_mib {peak_live:.3f} MiB"
+    )
+    assert peak_live <= peak_cuda * 1.001 + 1.0, (
+        f"{tag}: peak_live_mib {peak_live:.3f} MiB exceeds peak_cuda_mib "
+        f"{peak_cuda:.3f} MiB; storage-based liveness model is overcounting"
+    )
 
 
 def _run_profiled_iteration(
@@ -356,7 +380,7 @@ def _plot_peak_breakdown_at_peak(
     x = list(range(len(labels)))
     bottoms = [0.0 for _ in labels]
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 4), dpi=160)
+    fig, ax = plt.subplots(1, 1, figsize=(9, 5), dpi=160)
     for key, pretty_name in categories:
         values = []
         for model_name in model_order:
@@ -377,24 +401,86 @@ def _plot_peak_breakdown_at_peak(
         )
         bottoms = [b + v for b, v in zip(bottoms, values)]
 
+    headroom = max(totals) * 0.18
     for idx, total in enumerate(totals):
         ax.text(
             idx,
-            total + max(totals) * 0.015,
+            total + max(totals) * 0.02,
             f"{total:.1f} MiB",
             ha="center",
             va="bottom",
-            fontsize=8,
+            fontsize=9,
         )
 
+    ax.set_ylim(0, max(totals) + headroom)
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel("Live memory (MiB)")
-    ax.set_title("Peak Live-Memory Breakdown at Total Peak (w/o AC)")
+    ax.set_title(
+        "Peak Live-Memory Breakdown at Total Peak (w/o AC, smallest batch)",
+        pad=12,
+    )
     ax.grid(alpha=0.3, axis="y")
-    ax.legend(ncols=3, fontsize=8)
+    ax.legend(ncols=3, fontsize=8, loc="upper left")
     plt.tight_layout()
     plt.savefig(out_path)
+    plt.close(fig)
+
+
+def _plot_peak_breakdown_per_batch(
+    results: Dict[str, List[Dict[str, Any]]], out_path: str
+) -> None:
+    """Stacked breakdown of live memory at total peak across all batch sizes
+    for both models. Makes the shift from "optimizer-region peak" (small
+    batches) to "activation-dominated peak" (larger batches) visible, which is
+    the regime where activation checkpointing is expected to pay off."""
+    categories = [
+        ("param", "PARAM"),
+        ("act", "ACT"),
+        ("grad", "GRAD"),
+        ("opt_state", "OPT_STATE"),
+        ("other", "OTHER"),
+    ]
+    colors = {
+        "param": "#4C78A8",
+        "act": "#F58518",
+        "grad": "#E45756",
+        "opt_state": "#72B7B2",
+        "other": "#54A24B",
+    }
+    model_order = ["ResNet-152", "BERT-Base"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), dpi=160)
+    for ax_idx, model_name in enumerate(model_order):
+        model_results = results.get(model_name, [])
+        if not model_results:
+            continue
+        ax = axes[ax_idx]
+        x = list(range(len(model_results)))
+        labels = [str(e["batch_size"]) for e in model_results]
+        totals = [e["profile"]["peak_live_mib"] for e in model_results]
+        bottoms = [0.0 for _ in model_results]
+        for key, pretty_name in categories:
+            values = [
+                e["profile"]["peak_breakdown_live_mib"].get(key, 0.0)
+                for e in model_results
+            ]
+            ax.bar(x, values, width=0.6, bottom=bottoms, label=pretty_name, color=colors[key])
+            bottoms = [b + v for b, v in zip(bottoms, values)]
+        for idx, total in enumerate(totals):
+            ax.text(idx, total + max(totals) * 0.02, f"{total:.0f}", ha="center", va="bottom", fontsize=8)
+        ax.set_ylim(0, max(totals) * 1.18)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_xlabel("Mini-batch size")
+        ax.set_ylabel("Live memory (MiB)")
+        ax.set_title(f"{model_name} (w/o AC)")
+        ax.grid(alpha=0.3, axis="y")
+        if ax_idx == 0:
+            ax.legend(ncols=3, fontsize=8, loc="upper left")
+    plt.suptitle("Peak Live-Memory Breakdown at Total Peak by Batch Size (w/o AC)", y=1.02)
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -430,6 +516,12 @@ def run_midway_checkin() -> Dict[str, Any]:
                 optimizer=optimizer,
                 example_inputs=example_inputs,
             )
+            _validate_profile_summary(exp_cfg.model_name, batch_size, profile_summary)
+            print(
+                f"[ok] {exp_cfg.model_name} batch={batch_size}: "
+                f"peak_live={profile_summary['peak_live_mib']:.2f} MiB, "
+                f"peak_cuda={profile_summary['peak_cuda_mib']:.2f} MiB"
+            )
             all_results[exp_cfg.model_name].append(
                 {"batch_size": batch_size, "profile": profile_summary}
             )
@@ -447,9 +539,15 @@ def run_midway_checkin() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     results = run_midway_checkin()
-    json_path = "midway_results_wo_ac.json"
-    plot_path = "midway_peak_memory_wo_ac.png"
-    breakdown_plot_path = "midway_peak_breakdown_at_peak_wo_ac.png"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    json_path = os.path.join(OUTPUT_DIR, "midway_results_wo_ac.json")
+    plot_path = os.path.join(OUTPUT_DIR, "midway_peak_memory_wo_ac.png")
+    breakdown_plot_path = os.path.join(
+        OUTPUT_DIR, "midway_peak_breakdown_at_peak_wo_ac.png"
+    )
+    breakdown_per_batch_path = os.path.join(
+        OUTPUT_DIR, "midway_peak_breakdown_per_batch_wo_ac.png"
+    )
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
@@ -458,6 +556,10 @@ if __name__ == "__main__":
     _plot_peak_breakdown_at_peak(
         results["deliverable_4a_without_ac"]["results"], breakdown_plot_path
     )
+    _plot_peak_breakdown_per_batch(
+        results["deliverable_4a_without_ac"]["results"], breakdown_per_batch_path
+    )
     print(f"Wrote: {json_path}")
     print(f"Wrote: {plot_path}")
     print(f"Wrote: {breakdown_plot_path}")
+    print(f"Wrote: {breakdown_per_batch_path}")

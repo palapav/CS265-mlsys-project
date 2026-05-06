@@ -9,14 +9,14 @@
           "profile": {
             "num_graph_nodes": 18498,
             "num_activations": 777,
-            "peak_live_mib": 1377.7014083862305,
-            "peak_cuda_mib": 1214.86572265625,
+            "peak_live_mib": 1148.0914459228516,
+            "peak_cuda_mib": 1213.80322265625,
             "node_type_counts": {
               "param": 934,
-              "act": 777,
+              "act": 1297,
               "grad": 1300,
-              "opt_state": 2335,
-              "other": 13152
+              "opt_state": 14495,
+              "other": 472
             },
             "placeholder_role_counts": {
               "param": 467,
@@ -28,16 +28,16 @@
             "peak_breakdown_live_mib": {
               "param": 229.61734008789062,
               "act": 0.0,
-              "grad": 229.61734008789062,
-              "opt_state": 459.23468017578125,
-              "other": 459.23204803466797
+              "grad": 0.0,
+              "opt_state": 918.4729232788086,
+              "other": 0.00118255615234375
             },
             "peak_category_max_live_mib": {
               "param": 229.61734008789062,
-              "act": 345.6712074279785,
-              "grad": 247.67276000976562,
-              "opt_state": 459.2364616394043,
-              "other": 688.8493881225586
+              "act": 337.8587112426758,
+              "grad": 241.54678344726562,
+              "opt_state": 918.4729232788086,
+              "other": 1.7272758483886719
             },
             "graph_evidence": {
               "separator_validation": {
@@ -171,73 +171,73 @@
             },
             "top_runtime_ops": [
               {
-                "name": "_foreach_div_1",
-                "op": "call_function",
-                "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.147152066230774,
-                "output_mib": 229.61734008789062
-              },
-              {
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.0425440073013306,
+                "avg_runtime_ms": 3.6854559183120728,
+                "output_mib": 229.61734008789062
+              },
+              {
+                "name": "_foreach_div_1",
+                "op": "call_function",
+                "target": "aten._foreach_div.List",
+                "avg_runtime_ms": 3.0717920064926147,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_addcdiv",
                 "op": "call_function",
                 "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 2.152367949485779,
+                "avg_runtime_ms": 2.2602720260620117,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 1.8567519783973694,
+                "avg_runtime_ms": 2.1781280040740967,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_mul",
                 "op": "call_function",
                 "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 1.2838720083236694,
-                "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_add_1",
-                "op": "call_function",
-                "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 1.2456960082054138,
+                "avg_runtime_ms": 1.7540000677108765,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_sqrt_1",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.2351999878883362,
+                "avg_runtime_ms": 1.687343955039978,
                 "output_mib": 229.61734008789062
               },
               {
-                "name": "_foreach_div",
+                "name": "_foreach_pow_1",
                 "op": "call_function",
-                "target": "aten._foreach_div.Scalar",
-                "avg_runtime_ms": 1.2181439995765686,
+                "target": "aten._foreach_pow.ScalarAndTensor",
+                "avg_runtime_ms": 1.5996000170707703,
                 "output_mib": 0.001781463623046875
               },
               {
                 "name": "_foreach_sqrt",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.2034720182418823,
+                "avg_runtime_ms": 1.5940960049629211,
                 "output_mib": 0.001781463623046875
               },
               {
-                "name": "_foreach_sub_1",
+                "name": "_foreach_neg",
                 "op": "call_function",
-                "target": "aten._foreach_sub.Scalar",
-                "avg_runtime_ms": 1.2011039853096008,
+                "target": "aten._foreach_neg.default",
+                "avg_runtime_ms": 1.5719520449638367,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_div",
+                "op": "call_function",
+                "target": "aten._foreach_div.Scalar",
+                "avg_runtime_ms": 1.532096028327942,
                 "output_mib": 0.001781463623046875
               }
             ],
@@ -249,36 +249,6 @@
                 "first_backward_use": "t_1"
               },
               {
-                "name": "convolution_7",
-                "size_mib": 6.125,
-                "last_forward_use": "cudnn_batch_norm_7",
-                "first_backward_use": "cudnn_batch_norm_backward_147"
-              },
-              {
-                "name": "convolution_10",
-                "size_mib": 6.125,
-                "last_forward_use": "cudnn_batch_norm_10",
-                "first_backward_use": "cudnn_batch_norm_backward_144"
-              },
-              {
-                "name": "relu__6",
-                "size_mib": 6.125,
-                "last_forward_use": "add__13",
-                "first_backward_use": "convolution_backward_146"
-              },
-              {
-                "name": "relu__9",
-                "size_mib": 6.125,
-                "last_forward_use": "convolution_14",
-                "first_backward_use": "convolution_backward_140"
-              },
-              {
-                "name": "relu_",
-                "size_mib": 6.125,
-                "last_forward_use": "max_pool2d_with_indices",
-                "first_backward_use": "max_pool2d_with_indices_backward"
-              },
-              {
                 "name": "convolution",
                 "size_mib": 6.125,
                 "last_forward_use": "cudnn_batch_norm",
@@ -301,6 +271,36 @@
                 "size_mib": 6.125,
                 "last_forward_use": "add__9",
                 "first_backward_use": "convolution_backward_149"
+              },
+              {
+                "name": "relu_",
+                "size_mib": 6.125,
+                "last_forward_use": "max_pool2d_with_indices",
+                "first_backward_use": "max_pool2d_with_indices_backward"
+              },
+              {
+                "name": "convolution_7",
+                "size_mib": 6.125,
+                "last_forward_use": "cudnn_batch_norm_7",
+                "first_backward_use": "cudnn_batch_norm_backward_147"
+              },
+              {
+                "name": "convolution_10",
+                "size_mib": 6.125,
+                "last_forward_use": "cudnn_batch_norm_10",
+                "first_backward_use": "cudnn_batch_norm_backward_144"
+              },
+              {
+                "name": "relu__6",
+                "size_mib": 6.125,
+                "last_forward_use": "add__13",
+                "first_backward_use": "convolution_backward_146"
+              },
+              {
+                "name": "relu__9",
+                "size_mib": 6.125,
+                "last_forward_use": "convolution_14",
+                "first_backward_use": "convolution_backward_140"
               }
             ]
           }
@@ -310,14 +310,14 @@
           "profile": {
             "num_graph_nodes": 18498,
             "num_activations": 777,
-            "peak_live_mib": 1423.131259918213,
-            "peak_cuda_mib": 1485.58349609375,
+            "peak_live_mib": 1420.068759918213,
+            "peak_cuda_mib": 1483.93505859375,
             "node_type_counts": {
               "param": 934,
-              "act": 777,
+              "act": 1297,
               "grad": 1300,
-              "opt_state": 2335,
-              "other": 13152
+              "opt_state": 14495,
+              "other": 472
             },
             "placeholder_role_counts": {
               "param": 467,
@@ -329,16 +329,16 @@
             "peak_breakdown_live_mib": {
               "param": 229.61734008789062,
               "act": 657.39794921875,
-              "grad": 74.08975219726562,
+              "grad": 71.02725219726562,
               "opt_state": 459.2364616394043,
               "other": 2.7897567749023438
             },
             "peak_category_max_live_mib": {
               "param": 229.61734008789062,
-              "act": 682.9522743225098,
-              "grad": 266.0477600097656,
-              "opt_state": 459.2364616394043,
-              "other": 688.8493881225586
+              "act": 675.139778137207,
+              "grad": 253.79678344726562,
+              "opt_state": 918.4729232788086,
+              "other": 2.8757286071777344
             },
             "graph_evidence": {
               "separator_validation": {
@@ -475,74 +475,80 @@
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.5863360166549683,
+                "avg_runtime_ms": 3.9480159282684326,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_div_1",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.3018879890441895,
+                "avg_runtime_ms": 3.498304009437561,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_addcdiv",
                 "op": "call_function",
                 "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 2.311071991920471,
+                "avg_runtime_ms": 2.486720085144043,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 2.0291680097579956,
+                "avg_runtime_ms": 2.466368079185486,
                 "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_mul",
-                "op": "call_function",
-                "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 1.6146880388259888,
-                "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_add_1",
-                "op": "call_function",
-                "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 1.4980480074882507,
-                "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_div",
-                "op": "call_function",
-                "target": "aten._foreach_div.Scalar",
-                "avg_runtime_ms": 1.466271996498108,
-                "output_mib": 0.001781463623046875
               },
               {
                 "name": "_foreach_sqrt_1",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.4331039786338806,
+                "avg_runtime_ms": 1.967743992805481,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_sqrt",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.4146720170974731,
+                "avg_runtime_ms": 1.9587519764900208,
                 "output_mib": 0.001781463623046875
               },
               {
-                "name": "_foreach_pow",
+                "name": "_foreach_reciprocal",
                 "op": "call_function",
-                "target": "aten._foreach_pow.ScalarAndTensor",
-                "avg_runtime_ms": 1.3676159977912903,
+                "target": "aten._foreach_reciprocal.default",
+                "avg_runtime_ms": 1.917136013507843,
                 "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_div",
+                "op": "call_function",
+                "target": "aten._foreach_div.Scalar",
+                "avg_runtime_ms": 1.896016001701355,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_neg",
+                "op": "call_function",
+                "target": "aten._foreach_neg.default",
+                "avg_runtime_ms": 1.881887972354889,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_mul",
+                "op": "call_function",
+                "target": "aten._foreach_mul.Scalar",
+                "avg_runtime_ms": 1.7897120118141174,
+                "output_mib": 229.61734008789062
               }
             ],
             "largest_activations": [
+              {
+                "name": "convolution_7",
+                "size_mib": 12.25,
+                "last_forward_use": "cudnn_batch_norm_7",
+                "first_backward_use": "cudnn_batch_norm_backward_147"
+              },
               {
                 "name": "relu__6",
                 "size_mib": 12.25,
@@ -556,10 +562,16 @@
                 "first_backward_use": "cudnn_batch_norm_backward_154"
               },
               {
-                "name": "relu__9",
+                "name": "convolution_3",
                 "size_mib": 12.25,
-                "last_forward_use": "convolution_14",
-                "first_backward_use": "convolution_backward_140"
+                "last_forward_use": "cudnn_batch_norm_3",
+                "first_backward_use": "cudnn_batch_norm_backward_151"
+              },
+              {
+                "name": "convolution_4",
+                "size_mib": 12.25,
+                "last_forward_use": "cudnn_batch_norm_4",
+                "first_backward_use": "cudnn_batch_norm_backward_150"
               },
               {
                 "name": "convolution_10",
@@ -574,28 +586,16 @@
                 "first_backward_use": "max_pool2d_with_indices_backward"
               },
               {
-                "name": "convolution_7",
-                "size_mib": 12.25,
-                "last_forward_use": "cudnn_batch_norm_7",
-                "first_backward_use": "cudnn_batch_norm_backward_147"
-              },
-              {
-                "name": "convolution_3",
-                "size_mib": 12.25,
-                "last_forward_use": "cudnn_batch_norm_3",
-                "first_backward_use": "cudnn_batch_norm_backward_151"
-              },
-              {
                 "name": "relu__3",
                 "size_mib": 12.25,
                 "last_forward_use": "add__9",
                 "first_backward_use": "convolution_backward_149"
               },
               {
-                "name": "convolution_4",
+                "name": "relu__9",
                 "size_mib": 12.25,
-                "last_forward_use": "cudnn_batch_norm_4",
-                "first_backward_use": "cudnn_batch_norm_backward_150"
+                "last_forward_use": "convolution_14",
+                "first_backward_use": "convolution_backward_140"
               },
               {
                 "name": "t",
@@ -611,14 +611,14 @@
           "profile": {
             "num_graph_nodes": 18498,
             "num_activations": 777,
-            "peak_live_mib": 2091.521884918213,
-            "peak_cuda_mib": 2160.48974609375,
+            "peak_live_mib": 2086.463291168213,
+            "peak_cuda_mib": 2160.27099609375,
             "node_type_counts": {
               "param": 934,
-              "act": 777,
+              "act": 1297,
               "grad": 1300,
-              "opt_state": 2335,
-              "other": 13152
+              "opt_state": 14495,
+              "other": 472
             },
             "placeholder_role_counts": {
               "param": 467,
@@ -629,17 +629,17 @@
             },
             "peak_breakdown_live_mib": {
               "param": 229.61734008789062,
-              "act": 1314.30419921875,
-              "grad": 83.27725219726562,
+              "act": 1320.43310546875,
+              "grad": 72.08584594726562,
               "opt_state": 459.2364616394043,
-              "other": 5.086631774902344
+              "other": 5.090538024902344
             },
             "peak_category_max_live_mib": {
               "param": 229.61734008789062,
-              "act": 1357.5144081115723,
-              "grad": 302.7977600097656,
-              "opt_state": 459.2364616394043,
-              "other": 688.8493881225586
+              "act": 1349.7019119262695,
+              "grad": 278.2967834472656,
+              "opt_state": 918.4729232788086,
+              "other": 5.172634124755859
             },
             "graph_evidence": {
               "separator_validation": {
@@ -776,70 +776,70 @@
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.526304006576538,
+                "avg_runtime_ms": 3.8258719444274902,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_div_1",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 3.331712007522583,
-                "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_addcdiv",
-                "op": "call_function",
-                "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 2.3222559690475464,
+                "avg_runtime_ms": 3.4493919610977173,
                 "output_mib": 229.61734008789062
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 2.073855996131897,
+                "avg_runtime_ms": 2.5487040281295776,
                 "output_mib": 229.61734008789062
               },
               {
-                "name": "_foreach_mul",
+                "name": "_foreach_addcdiv",
                 "op": "call_function",
-                "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 1.6222079992294312,
+                "target": "aten._foreach_addcdiv.Scalar",
+                "avg_runtime_ms": 2.466528058052063,
                 "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_div",
-                "op": "call_function",
-                "target": "aten._foreach_div.Scalar",
-                "avg_runtime_ms": 1.5231519937515259,
-                "output_mib": 0.001781463623046875
               },
               {
                 "name": "_foreach_sqrt_1",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.5059680342674255,
+                "avg_runtime_ms": 2.0039360523223877,
                 "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_add_1",
-                "op": "call_function",
-                "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 1.4657920002937317,
-                "output_mib": 229.61734008789062
-              },
-              {
-                "name": "_foreach_sqrt",
-                "op": "call_function",
-                "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 1.4453920125961304,
-                "output_mib": 0.001781463623046875
               },
               {
                 "name": "_foreach_pow_1",
                 "op": "call_function",
                 "target": "aten._foreach_pow.ScalarAndTensor",
-                "avg_runtime_ms": 1.4194560050964355,
+                "avg_runtime_ms": 1.9431679844856262,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_sqrt",
+                "op": "call_function",
+                "target": "aten._foreach_sqrt.default",
+                "avg_runtime_ms": 1.9180160164833069,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_div",
+                "op": "call_function",
+                "target": "aten._foreach_div.Scalar",
+                "avg_runtime_ms": 1.9112800359725952,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_reciprocal",
+                "op": "call_function",
+                "target": "aten._foreach_reciprocal.default",
+                "avg_runtime_ms": 1.8984320163726807,
+                "output_mib": 0.001781463623046875
+              },
+              {
+                "name": "_foreach_neg",
+                "op": "call_function",
+                "target": "aten._foreach_neg.default",
+                "avg_runtime_ms": 1.8250719904899597,
                 "output_mib": 0.001781463623046875
               }
             ],
@@ -851,22 +851,22 @@
                 "first_backward_use": "cudnn_batch_norm_backward_147"
               },
               {
+                "name": "relu__6",
+                "size_mib": 24.5,
+                "last_forward_use": "add__13",
+                "first_backward_use": "convolution_backward_146"
+              },
+              {
+                "name": "convolution",
+                "size_mib": 24.5,
+                "last_forward_use": "cudnn_batch_norm",
+                "first_backward_use": "cudnn_batch_norm_backward_154"
+              },
+              {
                 "name": "relu_",
                 "size_mib": 24.5,
                 "last_forward_use": "max_pool2d_with_indices",
                 "first_backward_use": "max_pool2d_with_indices_backward"
-              },
-              {
-                "name": "relu__3",
-                "size_mib": 24.5,
-                "last_forward_use": "add__9",
-                "first_backward_use": "convolution_backward_149"
-              },
-              {
-                "name": "convolution_3",
-                "size_mib": 24.5,
-                "last_forward_use": "cudnn_batch_norm_3",
-                "first_backward_use": "cudnn_batch_norm_backward_151"
               },
               {
                 "name": "convolution_4",
@@ -881,16 +881,16 @@
                 "first_backward_use": "cudnn_batch_norm_backward_144"
               },
               {
-                "name": "convolution",
+                "name": "relu__3",
                 "size_mib": 24.5,
-                "last_forward_use": "cudnn_batch_norm",
-                "first_backward_use": "cudnn_batch_norm_backward_154"
+                "last_forward_use": "add__9",
+                "first_backward_use": "convolution_backward_149"
               },
               {
-                "name": "relu__6",
+                "name": "convolution_3",
                 "size_mib": 24.5,
-                "last_forward_use": "add__13",
-                "first_backward_use": "convolution_backward_146"
+                "last_forward_use": "cudnn_batch_norm_3",
+                "first_backward_use": "cudnn_batch_norm_backward_151"
               },
               {
                 "name": "relu__9",
@@ -899,10 +899,10 @@
                 "first_backward_use": "convolution_backward_140"
               },
               {
-                "name": "convolution_23",
+                "name": "relu__27",
                 "size_mib": 12.25,
-                "last_forward_use": "cudnn_batch_norm_23",
-                "first_backward_use": "cudnn_batch_norm_backward_131"
+                "last_forward_use": "add__42",
+                "first_backward_use": "convolution_backward_124"
               }
             ]
           }
@@ -914,14 +914,14 @@
           "profile": {
             "num_graph_nodes": 8810,
             "num_activations": 353,
-            "peak_live_mib": 2954.1487045288086,
-            "peak_cuda_mib": 2312.67431640625,
+            "peak_live_mib": 2267.8937225341797,
+            "peak_cuda_mib": 2314.14306640625,
             "node_type_counts": {
               "param": 406,
-              "act": 353,
+              "act": 683,
               "grad": 1368,
-              "opt_state": 1016,
-              "other": 5667
+              "opt_state": 6344,
+              "other": 9
             },
             "placeholder_role_counts": {
               "param": 204,
@@ -931,18 +931,18 @@
               "total": 822
             },
             "peak_breakdown_live_mib": {
-              "param": 507.3002471923828,
+              "param": 417.7638931274414,
               "act": 0.0,
-              "grad": 417.7638931274414,
-              "opt_state": 1014.6005020141602,
-              "other": 1014.4840621948242
+              "grad": 0.0,
+              "opt_state": 1850.1298294067383,
+              "other": 0.0
             },
             "peak_category_max_live_mib": {
-              "param": 507.3002471923828,
-              "act": 834.552921295166,
+              "param": 417.7638931274414,
+              "act": 364.8751907348633,
               "grad": 507.1838150024414,
-              "opt_state": 1014.6012725830078,
-              "other": 1521.784309387207
+              "opt_state": 1850.1298294067383,
+              "other": 0.015625
             },
             "graph_evidence": {
               "separator_validation": {
@@ -1076,73 +1076,73 @@
             },
             "top_runtime_ops": [
               {
-                "name": "_foreach_addcdiv",
-                "op": "call_function",
-                "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 1.532591998577118,
-                "output_mib": 507.3002471923828
-              },
-              {
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.4358720183372498,
+                "avg_runtime_ms": 2.0970879793167114,
                 "output_mib": 507.3002471923828
               },
               {
-                "name": "_foreach_div_1",
+                "name": "_foreach_addcdiv",
                 "op": "call_function",
-                "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.4091999530792236,
+                "target": "aten._foreach_addcdiv.Scalar",
+                "avg_runtime_ms": 1.7002879977226257,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 1.3154399991035461,
+                "avg_runtime_ms": 1.5659199953079224,
                 "output_mib": 507.3002471923828
               },
               {
-                "name": "_foreach_sqrt_1",
+                "name": "_foreach_div_1",
                 "op": "call_function",
-                "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 0.917167991399765,
-                "output_mib": 507.3002471923828
-              },
-              {
-                "name": "_foreach_add_1",
-                "op": "call_function",
-                "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 0.900848001241684,
+                "target": "aten._foreach_div.List",
+                "avg_runtime_ms": 1.5516319870948792,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_mul",
                 "op": "call_function",
                 "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 0.8885279893875122,
+                "avg_runtime_ms": 1.087440013885498,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_add_1",
+                "op": "call_function",
+                "target": "aten._foreach_add.Scalar",
+                "avg_runtime_ms": 1.0627999901771545,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_sqrt_1",
+                "op": "call_function",
+                "target": "aten._foreach_sqrt.default",
+                "avg_runtime_ms": 1.0373600125312805,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_lerp_",
                 "op": "call_function",
                 "target": "aten._foreach_lerp_.Scalar",
-                "avg_runtime_ms": 0.8811839818954468,
+                "avg_runtime_ms": 0.9529120028018951,
                 "output_mib": 0.0
               },
               {
-                "name": "mm_1",
+                "name": "_foreach_pow_1",
                 "op": "call_function",
-                "target": "aten.mm.default",
-                "avg_runtime_ms": 0.7479040026664734,
-                "output_mib": 89.419921875
+                "target": "aten._foreach_pow.ScalarAndTensor",
+                "avg_runtime_ms": 0.7043039798736572,
+                "output_mib": 0.0007781982421875
               },
               {
                 "name": "_foreach_pow",
                 "op": "call_function",
                 "target": "aten._foreach_pow.ScalarAndTensor",
-                "avg_runtime_ms": 0.6032319962978363,
+                "avg_runtime_ms": 0.7015840113162994,
                 "output_mib": 0.0007781982421875
               }
             ],
@@ -1160,16 +1160,40 @@
                 "first_backward_use": "nll_loss_backward"
               },
               {
-                "name": "t_46",
+                "name": "t_29",
                 "size_mib": 9.0,
-                "last_forward_use": "addmm_46",
-                "first_backward_use": "t_182"
+                "last_forward_use": "addmm_29",
+                "first_backward_use": "t_250"
               },
               {
-                "name": "t_47",
+                "name": "t_52",
                 "size_mib": 9.0,
-                "last_forward_use": "addmm_47",
-                "first_backward_use": "t_178"
+                "last_forward_use": "addmm_52",
+                "first_backward_use": "t_158"
+              },
+              {
+                "name": "t_53",
+                "size_mib": 9.0,
+                "last_forward_use": "addmm_53",
+                "first_backward_use": "t_154"
+              },
+              {
+                "name": "t_4",
+                "size_mib": 9.0,
+                "last_forward_use": "addmm_4",
+                "first_backward_use": "t_350"
+              },
+              {
+                "name": "t_16",
+                "size_mib": 9.0,
+                "last_forward_use": "addmm_16",
+                "first_backward_use": "t_302"
+              },
+              {
+                "name": "t_17",
+                "size_mib": 9.0,
+                "last_forward_use": "addmm_17",
+                "first_backward_use": "t_298"
               },
               {
                 "name": "t_70",
@@ -1178,34 +1202,10 @@
                 "first_backward_use": "t_86"
               },
               {
-                "name": "t_40",
-                "size_mib": 9.0,
-                "last_forward_use": "addmm_40",
-                "first_backward_use": "t_206"
-              },
-              {
                 "name": "t_71",
                 "size_mib": 9.0,
                 "last_forward_use": "addmm_71",
                 "first_backward_use": "t_82"
-              },
-              {
-                "name": "t_41",
-                "size_mib": 9.0,
-                "last_forward_use": "addmm_41",
-                "first_backward_use": "t_202"
-              },
-              {
-                "name": "t_34",
-                "size_mib": 9.0,
-                "last_forward_use": "addmm_34",
-                "first_backward_use": "t_230"
-              },
-              {
-                "name": "t_65",
-                "size_mib": 9.0,
-                "last_forward_use": "addmm_65",
-                "first_backward_use": "t_106"
               }
             ]
           }
@@ -1215,14 +1215,14 @@
           "profile": {
             "num_graph_nodes": 8811,
             "num_activations": 353,
-            "peak_live_mib": 2954.1487045288086,
+            "peak_live_mib": 2267.8937225341797,
             "peak_cuda_mib": 2307.33837890625,
             "node_type_counts": {
               "param": 406,
-              "act": 353,
+              "act": 683,
               "grad": 1369,
-              "opt_state": 1016,
-              "other": 5667
+              "opt_state": 6344,
+              "other": 9
             },
             "placeholder_role_counts": {
               "param": 204,
@@ -1232,18 +1232,18 @@
               "total": 822
             },
             "peak_breakdown_live_mib": {
-              "param": 507.3002471923828,
+              "param": 417.7638931274414,
               "act": 0.0,
-              "grad": 417.7638931274414,
-              "opt_state": 1014.6005020141602,
-              "other": 1014.4840621948242
+              "grad": 0.0,
+              "opt_state": 1850.1298294067383,
+              "other": 0.0
             },
             "peak_category_max_live_mib": {
-              "param": 507.3002471923828,
-              "act": 1253.431827545166,
+              "param": 417.7638931274414,
+              "act": 729.7462844848633,
               "grad": 507.1838150024414,
-              "opt_state": 1014.6012725830078,
-              "other": 1521.784309387207
+              "opt_state": 1850.1298294067383,
+              "other": 0.0234375
             },
             "graph_evidence": {
               "separator_validation": {
@@ -1377,73 +1377,73 @@
             },
             "top_runtime_ops": [
               {
-                "name": "_foreach_div_1",
-                "op": "call_function",
-                "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.7207199931144714,
-                "output_mib": 507.3002471923828
-              },
-              {
                 "name": "_foreach_addcdiv",
                 "op": "call_function",
                 "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 1.5864160060882568,
+                "avg_runtime_ms": 1.752016007900238,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_div_1",
+                "op": "call_function",
+                "target": "aten._foreach_div.List",
+                "avg_runtime_ms": 1.7040320038795471,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.513551950454712,
+                "avg_runtime_ms": 1.6925600171089172,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 1.4107360243797302,
+                "avg_runtime_ms": 1.505728006362915,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "addmm_73",
+                "op": "call_function",
+                "target": "aten.addmm.default",
+                "avg_runtime_ms": 1.1372959613800049,
+                "output_mib": 119.2265625
+              },
+              {
+                "name": "_foreach_add_1",
+                "op": "call_function",
+                "target": "aten._foreach_add.Scalar",
+                "avg_runtime_ms": 1.1025279760360718,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "mm",
+                "op": "call_function",
+                "target": "aten.mm.default",
+                "avg_runtime_ms": 1.0779680013656616,
+                "output_mib": 3.0
+              },
+              {
+                "name": "_foreach_sqrt_1",
+                "op": "call_function",
+                "target": "aten._foreach_sqrt.default",
+                "avg_runtime_ms": 1.0750240087509155,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "mm_1",
                 "op": "call_function",
                 "target": "aten.mm.default",
-                "avg_runtime_ms": 1.2350559830665588,
+                "avg_runtime_ms": 1.0479679703712463,
                 "output_mib": 89.419921875
-              },
-              {
-                "name": "addmm_73",
-                "op": "call_function",
-                "target": "aten.addmm.default",
-                "avg_runtime_ms": 1.106880009174347,
-                "output_mib": 119.2265625
-              },
-              {
-                "name": "mm",
-                "op": "call_function",
-                "target": "aten.mm.default",
-                "avg_runtime_ms": 1.058624029159546,
-                "output_mib": 3.0
-              },
-              {
-                "name": "_foreach_add_1",
-                "op": "call_function",
-                "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 0.9923200011253357,
-                "output_mib": 507.3002471923828
-              },
-              {
-                "name": "_foreach_sqrt_1",
-                "op": "call_function",
-                "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 0.9751999974250793,
-                "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_mul",
                 "op": "call_function",
                 "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 0.9721119999885559,
+                "avg_runtime_ms": 1.0422719717025757,
                 "output_mib": 507.3002471923828
               }
             ],
@@ -1461,22 +1461,28 @@
                 "first_backward_use": "t_74"
               },
               {
-                "name": "view_45",
-                "size_mib": 12.0,
-                "last_forward_use": "gelu_2",
-                "first_backward_use": "gelu_backward_10"
-              },
-              {
-                "name": "view_46",
-                "size_mib": 12.0,
-                "last_forward_use": "addmm_17",
-                "first_backward_use": "mm_113"
-              },
-              {
                 "name": "view_93",
                 "size_mib": 12.0,
                 "last_forward_use": "gelu_5",
                 "first_backward_use": "gelu_backward_7"
+              },
+              {
+                "name": "view_13",
+                "size_mib": 12.0,
+                "last_forward_use": "gelu",
+                "first_backward_use": "gelu_backward_12"
+              },
+              {
+                "name": "view_14",
+                "size_mib": 12.0,
+                "last_forward_use": "addmm_5",
+                "first_backward_use": "mm_137"
+              },
+              {
+                "name": "view_78",
+                "size_mib": 12.0,
+                "last_forward_use": "addmm_29",
+                "first_backward_use": "mm_89"
               },
               {
                 "name": "view_94",
@@ -1485,28 +1491,22 @@
                 "first_backward_use": "mm_77"
               },
               {
-                "name": "view_189",
+                "name": "view_173",
                 "size_mib": 12.0,
-                "last_forward_use": "gelu_11",
-                "first_backward_use": "gelu_backward_1"
+                "last_forward_use": "gelu_10",
+                "first_backward_use": "gelu_backward_2"
               },
               {
-                "name": "view_157",
+                "name": "view_77",
                 "size_mib": 12.0,
-                "last_forward_use": "gelu_9",
-                "first_backward_use": "gelu_backward_3"
+                "last_forward_use": "gelu_4",
+                "first_backward_use": "gelu_backward_8"
               },
               {
-                "name": "view_158",
+                "name": "view_174",
                 "size_mib": 12.0,
-                "last_forward_use": "addmm_59",
-                "first_backward_use": "mm_29"
-              },
-              {
-                "name": "view_61",
-                "size_mib": 12.0,
-                "last_forward_use": "gelu_3",
-                "first_backward_use": "gelu_backward_9"
+                "last_forward_use": "addmm_65",
+                "first_backward_use": "mm_17"
               }
             ]
           }
@@ -1516,14 +1516,14 @@
           "profile": {
             "num_graph_nodes": 8811,
             "num_activations": 353,
-            "peak_live_mib": 3851.5442810058594,
+            "peak_live_mib": 2951.2535705566406,
             "peak_cuda_mib": 3239.37744140625,
             "node_type_counts": {
               "param": 406,
-              "act": 353,
+              "act": 683,
               "grad": 1369,
-              "opt_state": 1016,
-              "other": 5667
+              "opt_state": 6344,
+              "other": 9
             },
             "placeholder_role_counts": {
               "param": 204,
@@ -1533,18 +1533,18 @@
               "total": 822
             },
             "peak_breakdown_live_mib": {
-              "param": 507.3002471923828,
-              "act": 2091.1740112304688,
+              "param": 417.7638931274414,
+              "act": 1459.4884643554688,
               "grad": 238.453125,
-              "opt_state": 1014.6012725830078,
-              "other": 0.015625
+              "opt_state": 835.5285568237305,
+              "other": 0.01953125
             },
             "peak_category_max_live_mib": {
-              "param": 507.3002471923828,
-              "act": 2091.189640045166,
+              "param": 417.7638931274414,
+              "act": 1459.4884719848633,
               "grad": 507.1838150024414,
-              "opt_state": 1014.6012725830078,
-              "other": 1521.784309387207
+              "opt_state": 1850.1298294067383,
+              "other": 0.0390625
             },
             "graph_evidence": {
               "separator_validation": {
@@ -1678,73 +1678,73 @@
             },
             "top_runtime_ops": [
               {
-                "name": "mm_1",
-                "op": "call_function",
-                "target": "aten.mm.default",
-                "avg_runtime_ms": 2.0989120602607727,
-                "output_mib": 89.419921875
-              },
-              {
                 "name": "mm",
                 "op": "call_function",
                 "target": "aten.mm.default",
-                "avg_runtime_ms": 2.018895983695984,
+                "avg_runtime_ms": 2.0481759309768677,
                 "output_mib": 6.0
               },
               {
                 "name": "addmm_73",
                 "op": "call_function",
                 "target": "aten.addmm.default",
-                "avg_runtime_ms": 2.008784055709839,
+                "avg_runtime_ms": 2.034880042076111,
                 "output_mib": 238.453125
               },
               {
-                "name": "_foreach_div_1",
+                "name": "mm_1",
                 "op": "call_function",
-                "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.6942239999771118,
-                "output_mib": 507.3002471923828
+                "target": "aten.mm.default",
+                "avg_runtime_ms": 1.9444000124931335,
+                "output_mib": 89.419921875
               },
               {
                 "name": "_foreach_addcdiv",
                 "op": "call_function",
                 "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 1.6008480191230774,
+                "avg_runtime_ms": 1.7160640358924866,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_div_1",
+                "op": "call_function",
+                "target": "aten._foreach_div.List",
+                "avg_runtime_ms": 1.6904000043869019,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.5099039673805237,
+                "avg_runtime_ms": 1.630847990512848,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 1.3787680268287659,
-                "output_mib": 507.3002471923828
-              },
-              {
-                "name": "_foreach_sqrt_1",
-                "op": "call_function",
-                "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 0.9943839609622955,
+                "avg_runtime_ms": 1.5196159482002258,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_add_1",
                 "op": "call_function",
                 "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 0.9715360105037689,
+                "avg_runtime_ms": 1.077392041683197,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_mul",
                 "op": "call_function",
                 "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 0.9564799964427948,
+                "avg_runtime_ms": 1.0765119791030884,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_sqrt_1",
+                "op": "call_function",
+                "target": "aten._foreach_sqrt.default",
+                "avg_runtime_ms": 1.06632000207901,
                 "output_mib": 507.3002471923828
               }
             ],
@@ -1762,16 +1762,22 @@
                 "first_backward_use": "t_74"
               },
               {
+                "name": "view_77",
+                "size_mib": 24.0,
+                "last_forward_use": "gelu_4",
+                "first_backward_use": "gelu_backward_8"
+              },
+              {
+                "name": "view_78",
+                "size_mib": 24.0,
+                "last_forward_use": "addmm_29",
+                "first_backward_use": "mm_89"
+              },
+              {
                 "name": "view_141",
                 "size_mib": 24.0,
                 "last_forward_use": "gelu_8",
                 "first_backward_use": "gelu_backward_4"
-              },
-              {
-                "name": "view_61",
-                "size_mib": 24.0,
-                "last_forward_use": "gelu_3",
-                "first_backward_use": "gelu_backward_9"
               },
               {
                 "name": "view_142",
@@ -1780,10 +1786,10 @@
                 "first_backward_use": "mm_41"
               },
               {
-                "name": "view_62",
+                "name": "view_189",
                 "size_mib": 24.0,
-                "last_forward_use": "addmm_23",
-                "first_backward_use": "mm_101"
+                "last_forward_use": "gelu_11",
+                "first_backward_use": "gelu_backward_1"
               },
               {
                 "name": "view_109",
@@ -1792,22 +1798,16 @@
                 "first_backward_use": "gelu_backward_6"
               },
               {
-                "name": "view_110",
+                "name": "view_29",
                 "size_mib": 24.0,
-                "last_forward_use": "addmm_41",
-                "first_backward_use": "mm_65"
+                "last_forward_use": "gelu_1",
+                "first_backward_use": "gelu_backward_11"
               },
               {
-                "name": "view_93",
+                "name": "view_190",
                 "size_mib": 24.0,
-                "last_forward_use": "gelu_5",
-                "first_backward_use": "gelu_backward_7"
-              },
-              {
-                "name": "view_94",
-                "size_mib": 24.0,
-                "last_forward_use": "addmm_35",
-                "first_backward_use": "mm_77"
+                "last_forward_use": "addmm_71",
+                "first_backward_use": "mm_5"
               }
             ]
           }
@@ -1817,14 +1817,14 @@
           "profile": {
             "num_graph_nodes": 8811,
             "num_activations": 353,
-            "peak_live_mib": 5765.513031005859,
-            "peak_cuda_mib": 5166.98681640625,
+            "peak_live_mib": 4649.206695556641,
+            "peak_cuda_mib": 5168.67431640625,
             "node_type_counts": {
               "param": 406,
-              "act": 353,
+              "act": 683,
               "grad": 1369,
-              "opt_state": 1016,
-              "other": 5667
+              "opt_state": 6344,
+              "other": 9
             },
             "placeholder_role_counts": {
               "param": 204,
@@ -1834,18 +1834,18 @@
               "total": 822
             },
             "peak_breakdown_live_mib": {
-              "param": 507.3002471923828,
-              "act": 3766.6740112304688,
+              "param": 417.7638931274414,
+              "act": 2918.9728393554688,
               "grad": 476.90625,
-              "opt_state": 1014.6012725830078,
-              "other": 0.03125
+              "opt_state": 835.5285568237305,
+              "other": 0.03515625
             },
             "peak_category_max_live_mib": {
-              "param": 507.3002471923828,
-              "act": 3766.705265045166,
-              "grad": 965.8125,
-              "opt_state": 1014.6012725830078,
-              "other": 1521.784309387207
+              "param": 417.7638931274414,
+              "act": 2918.9728469848633,
+              "grad": 578.326171875,
+              "opt_state": 1850.1298294067383,
+              "other": 0.0703125
             },
             "graph_evidence": {
               "separator_validation": {
@@ -1979,73 +1979,73 @@
             },
             "top_runtime_ops": [
               {
-                "name": "mm_1",
-                "op": "call_function",
-                "target": "aten.mm.default",
-                "avg_runtime_ms": 3.894240140914917,
-                "output_mib": 89.419921875
-              },
-              {
                 "name": "addmm_73",
                 "op": "call_function",
                 "target": "aten.addmm.default",
-                "avg_runtime_ms": 3.8091520071029663,
+                "avg_runtime_ms": 3.8363200426101685,
                 "output_mib": 476.90625
               },
               {
                 "name": "mm",
                 "op": "call_function",
                 "target": "aten.mm.default",
-                "avg_runtime_ms": 3.688688039779663,
+                "avg_runtime_ms": 3.7228000164031982,
                 "output_mib": 12.0
               },
               {
-                "name": "_foreach_div_1",
+                "name": "mm_1",
                 "op": "call_function",
-                "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.6733760237693787,
-                "output_mib": 507.3002471923828
+                "target": "aten.mm.default",
+                "avg_runtime_ms": 3.7164480686187744,
+                "output_mib": 89.419921875
               },
               {
                 "name": "_foreach_addcdiv",
                 "op": "call_function",
                 "target": "aten._foreach_addcdiv.Scalar",
-                "avg_runtime_ms": 1.5696959495544434,
+                "avg_runtime_ms": 1.6773279905319214,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_div_2",
                 "op": "call_function",
                 "target": "aten._foreach_div.List",
-                "avg_runtime_ms": 1.4899359941482544,
+                "avg_runtime_ms": 1.6253599524497986,
+                "output_mib": 507.3002471923828
+              },
+              {
+                "name": "_foreach_div_1",
+                "op": "call_function",
+                "target": "aten._foreach_div.List",
+                "avg_runtime_ms": 1.6146239638328552,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_addcmul",
                 "op": "call_function",
                 "target": "aten._foreach_addcmul.Scalar",
-                "avg_runtime_ms": 1.3632959723472595,
+                "avg_runtime_ms": 1.4871359467506409,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_add_1",
                 "op": "call_function",
                 "target": "aten._foreach_add.Scalar",
-                "avg_runtime_ms": 0.9623999893665314,
+                "avg_runtime_ms": 1.0703359842300415,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_sqrt_1",
                 "op": "call_function",
                 "target": "aten._foreach_sqrt.default",
-                "avg_runtime_ms": 0.9413439929485321,
+                "avg_runtime_ms": 1.036575973033905,
                 "output_mib": 507.3002471923828
               },
               {
                 "name": "_foreach_mul",
                 "op": "call_function",
                 "target": "aten._foreach_mul.Scalar",
-                "avg_runtime_ms": 0.9397599995136261,
+                "avg_runtime_ms": 1.0331679582595825,
                 "output_mib": 507.3002471923828
               }
             ],
@@ -2087,28 +2087,28 @@
                 "first_backward_use": "mm_89"
               },
               {
-                "name": "view_141",
+                "name": "view_45",
                 "size_mib": 48.0,
-                "last_forward_use": "gelu_8",
-                "first_backward_use": "gelu_backward_4"
+                "last_forward_use": "gelu_2",
+                "first_backward_use": "gelu_backward_10"
               },
               {
-                "name": "view_61",
+                "name": "view_125",
                 "size_mib": 48.0,
-                "last_forward_use": "gelu_3",
-                "first_backward_use": "gelu_backward_9"
+                "last_forward_use": "gelu_7",
+                "first_backward_use": "gelu_backward_5"
               },
               {
-                "name": "view_142",
+                "name": "view_126",
                 "size_mib": 48.0,
-                "last_forward_use": "addmm_53",
-                "first_backward_use": "mm_41"
+                "last_forward_use": "addmm_47",
+                "first_backward_use": "mm_53"
               },
               {
-                "name": "view_62",
+                "name": "view_189",
                 "size_mib": 48.0,
-                "last_forward_use": "addmm_23",
-                "first_backward_use": "mm_101"
+                "last_forward_use": "gelu_11",
+                "first_backward_use": "gelu_backward_1"
               }
             ]
           }

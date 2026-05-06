@@ -270,8 +270,7 @@ class GraphProfiler(fx.Interpreter):
             self.first_backward_use[node] = first_bwd
 
     def _classify_node(self, node: fx.Node) -> NodeType:
-        if node in self.activation_nodes:
-            return NodeType.ACT
+        # Placeholder roles are determined by runtime tensor identity.
         if node.op == OP.PLACEHOLDER and node in self.param_placeholders:
             return NodeType.PARAM
         if node.op == OP.PLACEHOLDER and node in self.opt_state_placeholders:
@@ -280,35 +279,82 @@ class GraphProfiler(fx.Interpreter):
             return NodeType.GRAD
         if node in self.param_nodes:
             return NodeType.PARAM
+        # Optimizer step write-backs.
         if node in self.optimizer_state_update_nodes:
             return NodeType.OPT_STATE
         if node in self.param_update_nodes:
             return NodeType.PARAM
+        # Forward-region tensor-producing nodes (excluding placeholders, the
+        # separator, and metadata-only ops) are categorized as ACT for memory
+        # accounting. This covers both the strict "saved-for-backward"
+        # activations (in `self.activation_nodes`, used by the Phase 2 AC
+        # algorithm) and the forward-only transient buffers that are alive
+        # only briefly during forward. The latter are not AC candidates, but
+        # they are forward-pass activation working memory in the broad ML
+        # sense, and lumping them into OTHER misleads the breakdown.
+        if (
+            self._is_forward_region(node)
+            and node.op not in (OP.PLACEHOLDER, OP.GET_ATTR, OP.OUTPUT)
+            and node is not self.sep_node
+        ):
+            return NodeType.ACT
         if self._is_backward_compute_region(node):
             return NodeType.GRAD
         if node in self.grad_related_nodes and self._is_backward_region(node):
             return NodeType.GRAD
+        # Optimizer-region intermediates (foreach math, getitem unpacks of
+        # _foreach_* lists, denom/sqrt buffers, addcdiv step intermediates,
+        # etc.) are the optimizer step's working set. We deliberately do NOT
+        # route param-update ancestors into PARAM: doing so misattributes Adam
+        # working buffers (denom, v_hat, step temporaries) to model parameters
+        # and inflates the PARAM bar by 2-3x at small batches when peak
+        # occurs in the optimizer region.
+        if self._is_optimizer_region(node):
+            return NodeType.OPT_STATE
         return NodeType.OTHER
 
-    def _tree_tensor_nbytes(self, value: Any) -> int:
-        # De-duplicate aliases within one output tree to avoid counting the same
-        # tensor storage multiple times (common with tuple/list outputs).
-        seen_ptrs: Set[int] = set()
+    def _extract_storages(self, value: Any) -> Dict[int, int]:
+        """Walk a node-output value tree and return a dict mapping each unique
+        underlying CUDA storage pointer to its byte size.
 
-        def _inner(v: Any) -> int:
+        We key by ``untyped_storage().data_ptr()`` (the start of the storage)
+        rather than ``tensor.data_ptr()`` (which is the start of a possibly-
+        offset view) so that all aliases (`view`, `t`, `transpose`,
+        `as_strided`, `getitem` of a `_foreach_*` list, `copy_` destination,
+        etc.) collapse to the same key. ``untyped_storage().nbytes()`` gives the
+        size of the actual storage allocation, which is the right quantity for
+        a memory model.
+        """
+        storages: Dict[int, int] = {}
+        seen_tensor_ids: Set[int] = set()
+
+        def _inner(v: Any) -> None:
             if isinstance(v, torch.Tensor):
-                ptr = v.data_ptr()
-                if ptr == 0 or ptr in seen_ptrs:
-                    return 0
-                seen_ptrs.add(ptr)
-                return v.nelement() * v.element_size()
-            if isinstance(v, (list, tuple)):
-                return sum(_inner(x) for x in v)
-            if isinstance(v, dict):
-                return sum(_inner(x) for x in v.values())
-            return 0
+                if id(v) in seen_tensor_ids:
+                    return
+                seen_tensor_ids.add(id(v))
+                try:
+                    storage = v.untyped_storage()
+                    ptr = storage.data_ptr()
+                    if ptr == 0:
+                        return
+                    if ptr not in storages:
+                        storages[ptr] = int(storage.nbytes())
+                except Exception:
+                    ptr = v.data_ptr()
+                    if ptr == 0:
+                        return
+                    if ptr not in storages:
+                        storages[ptr] = int(v.nelement() * v.element_size())
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    _inner(x)
+            elif isinstance(v, dict):
+                for x in v.values():
+                    _inner(x)
 
-        return _inner(value)
+        _inner(value)
+        return storages
 
     def _bytes_to_mib(self, nbytes: float) -> float:
         return nbytes / (1024.0 * 1024.0)
@@ -324,9 +370,15 @@ class GraphProfiler(fx.Interpreter):
         initial_env: Dict[fx.Node, Any] | None = None,
         enable_io_processing: bool = True
     ) -> Any:
+        # Storage-based liveness tracking. We refcount each unique CUDA storage
+        # by the number of live fx.Nodes still holding a reference to it. This
+        # gives a correct lower-bound view of memory: aliases never double-count
+        # and in-place ops (copy_, foreach_*_) do not falsely add bytes.
         self._remaining_uses: Dict[fx.Node, int] = dict(self._template_use_count)
-        self._live_node_bytes: Dict[fx.Node, int] = {}
-        self._live_node_type: Dict[fx.Node, NodeType] = {}
+        self._node_storage_ptrs: Dict[fx.Node, Set[int]] = {}
+        self._storage_bytes: Dict[int, int] = {}
+        self._storage_refcount: Dict[int, int] = {}
+        self._storage_category: Dict[int, NodeType] = {}
         self._cur_peak_total_bytes = 0
         self._cur_peak_total_composition_by_type_bytes: Dict[NodeType, int] = {
             node_type: 0 for node_type in NodeType
@@ -356,9 +408,6 @@ class GraphProfiler(fx.Interpreter):
         return result
 
     def run_node(self, n: fx.Node) -> Any:
-        # If you are in the backward pass region and one of the feature maps 'x'
-        # was swapped out, and if node 'n' will use this feature map 'x' as one
-        # of its inputs then you swap 'x' back to the GPU memory here.
         use_cuda_timer = torch.cuda.is_available()
         if use_cuda_timer:
             start_event = torch.cuda.Event(enable_timing=True)
@@ -369,10 +418,8 @@ class GraphProfiler(fx.Interpreter):
             before_alloc = 0
             start_time = time.perf_counter()
 
-        # you can start measuring the run-time of a node here
         result = super().run_node(n)
-        # you can end measuring the run-time of a node here HINT: Use
-        # torch.cuda.Events for doing time measurements of operations.
+
         if use_cuda_timer:
             end_event.record()
             end_event.synchronize()
@@ -389,41 +436,66 @@ class GraphProfiler(fx.Interpreter):
         self.node_runtime_ms[n].append(elapsed_ms)
         self.node_memory_delta_bytes[n].append(mem_delta_bytes)
 
-        output_bytes = 0
-        if self._is_tensor_producing(n) and not self._is_inplace_update_node(n):
-            output_bytes = self._tree_tensor_nbytes(result)
-        self.node_output_bytes[n] = max(self.node_output_bytes.get(n, 0), output_bytes)
+        # Increment refcounts on the unique storages this node's output holds.
+        # New storages are attributed to this node's category; pre-existing
+        # storages keep the category set by their first producer (typically a
+        # placeholder, which is always processed before any aliasing op).
+        node_output_bytes_total = 0
+        node_new_storage_bytes = 0
+        if self._is_tensor_producing(n):
+            output_storages = self._extract_storages(result)
+            if output_storages:
+                node_ptrs: Set[int] = set(output_storages.keys())
+                node_category = self.node_types.get(n, NodeType.OTHER)
+                for ptr, size in output_storages.items():
+                    node_output_bytes_total += size
+                    if ptr not in self._storage_bytes:
+                        self._storage_bytes[ptr] = size
+                        self._storage_refcount[ptr] = 0
+                        self._storage_category[ptr] = node_category
+                        node_new_storage_bytes += size
+                    self._storage_refcount[ptr] += 1
+                self._node_storage_ptrs[n] = node_ptrs
+        self.node_output_bytes[n] = max(
+            self.node_output_bytes.get(n, 0), node_output_bytes_total
+        )
+        # Track marginal bytes (new storage allocated by this node). Aliasing
+        # nodes (view/t/transpose/getitem of foreach lists, etc.) report 0
+        # here, which is what the Phase 2 selection algorithm needs to avoid
+        # "saving" memory by dropping a view of a tensor whose storage we
+        # would still keep alive via other consumers.
+        self.node_new_storage_bytes[n] = max(
+            self.node_new_storage_bytes.get(n, 0), node_new_storage_bytes
+        )
 
-        if output_bytes > 0:
-            self._live_node_bytes[n] = output_bytes
-            self._live_node_type[n] = self.node_types.get(n, NodeType.OTHER)
-
+        # Decrement refcounts as inputs reach end-of-life.
         for input_node in n.all_input_nodes:
             if input_node not in self._remaining_uses:
                 continue
             self._remaining_uses[input_node] -= 1
             if self._remaining_uses[input_node] <= 0:
                 self._remaining_uses.pop(input_node, None)
-                self._live_node_bytes.pop(input_node, None)
-                self._live_node_type.pop(input_node, None)
+                ptrs = self._node_storage_ptrs.pop(input_node, None)
+                if ptrs:
+                    for ptr in ptrs:
+                        if ptr in self._storage_refcount:
+                            self._storage_refcount[ptr] -= 1
+                            if self._storage_refcount[ptr] <= 0:
+                                self._storage_bytes.pop(ptr, None)
+                                self._storage_refcount.pop(ptr, None)
+                                self._storage_category.pop(ptr, None)
 
         live_by_type_bytes: Dict[NodeType, int] = {node_type: 0 for node_type in NodeType}
-        for live_node, nbytes in self._live_node_bytes.items():
-            node_type = self._live_node_type.get(
-                live_node, self.node_types.get(live_node, NodeType.OTHER)
-            )
-            live_by_type_bytes[node_type] += nbytes
-        live_total_bytes = sum(live_by_type_bytes.values())
+        for ptr, size in self._storage_bytes.items():
+            cat = self._storage_category.get(ptr, NodeType.OTHER)
+            live_by_type_bytes[cat] += size
+        live_total_bytes = sum(self._storage_bytes.values())
         if live_total_bytes > self._cur_peak_total_bytes:
             self._cur_peak_total_bytes = live_total_bytes
             self._cur_peak_total_composition_by_type_bytes = dict(live_by_type_bytes)
         for node_type in NodeType:
             if live_by_type_bytes[node_type] > self._cur_peak_by_type_bytes[node_type]:
                 self._cur_peak_by_type_bytes[node_type] = live_by_type_bytes[node_type]
-
-        # If you are in the forward pass region and if the current node 'n' is
-        # the last user of a feature map 'x', then it should be swapped out to
-        # the CPU memory here.
 
         return result
 
@@ -434,6 +506,12 @@ class GraphProfiler(fx.Interpreter):
         self.avg_runtime_ms: Dict[fx.Node, float] = {}
         self.avg_memory_delta_bytes: Dict[fx.Node, float] = {}
         self.avg_output_bytes: Dict[fx.Node, int] = dict(self.node_output_bytes)
+        # Marginal new-storage bytes per node, used by Phase 2 selection so
+        # alias-only nodes (views, transposes, getitem) are not credited with
+        # savings they wouldn't actually deliver.
+        self.avg_new_storage_bytes: Dict[fx.Node, int] = dict(
+            self.node_new_storage_bytes
+        )
         for node in self.nodes:
             runtime_samples = self.node_runtime_ms.get(node, [])
             mem_samples = self.node_memory_delta_bytes.get(node, [])
@@ -549,6 +627,9 @@ class GraphProfiler(fx.Interpreter):
             node: [] for node in self.nodes
         }
         self.node_output_bytes: Dict[fx.Node, int] = {node: 0 for node in self.nodes}
+        self.node_new_storage_bytes: Dict[fx.Node, int] = {
+            node: 0 for node in self.nodes
+        }
 
         self.peak_total_bytes_per_run: List[int] = []
         self.peak_total_composition_by_type_bytes_per_run: Dict[NodeType, List[int]] = {
