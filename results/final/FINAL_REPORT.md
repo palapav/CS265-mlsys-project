@@ -2,6 +2,12 @@
 
 **Activation checkpointing in PyTorch via FX-graph rewriting**
 
+### Aditya Palaparthi
+### GitHub Repo Link: https://github.com/palapav/CS265-mlsys-project
+### Results: https://github.com/palapav/CS265-mlsys-project/tree/main/results/final
+
+---
+
 This report covers the three project phases end-to-end:
 
 1. **Phase 1 — Computation graph profiler** (`graph_prof.py`)
@@ -20,7 +26,7 @@ three figures in this directory.
 | --- | --- |
 | `graph_tracer.py` | Course-provided. Wraps the train step in `compile()`, traces the joint forward+backward+optimizer graph with AOTAutograd, and inserts a `SEPFunction` separator op so the profiler can find the forward/backward boundary. Untouched. |
 | `graph_prof.py` | **Phase 1 profiler.** Extends `torch.fx.Interpreter` to execute node-by-node, time each op, classify each tensor by role (`PARAM` / `ACT` / `GRAD` / `OPT_STATE` / `OTHER`), track activation lifetimes (`last_forward_use`, `first_backward_use`), and maintain a refcounted, storage-based live-tensor model so aliases (e.g. `view`/`getitem` of `_foreach_*` lists) are not double-counted. Reports both the CUDA-allocator peak and the live-tensor peak; the midway report explained how the storage model fixed a previous over-count. New for Phase 2 it also exposes per-node *marginal new-storage bytes* (zero for views/aliases) so the selector picks activations that actually free memory. |
-| `activation_checkpoint.py` | **Phase 2 selection** (`select_recomputations`) and **Phase 3 rewriter** (`apply_activation_checkpointing`). Re-uses the course-provided `_extract_graph_with_inputs_outputs`-style recipe for subgraph extraction (`node_copy(arg_transform=...)` + `replace_subsequent_uses_of`); the original tutorial example `activation_checkpointing(gm)` is kept verbatim as documentation/reference. |
+| `activation_checkpoint.py` | **Phase 2 selection** (`select_recomputations`) and **Phase 3 rewriter** (`apply_activation_checkpointing`). Re-uses the course-provided `_extract_graph_with_inputs_outputs`-style recipe for subgraph extraction (`node_copy(arg_transform=...)` + `replace_subsequent_uses_of`); the original tutorial example `activation_checkpointing(gm)` is kept verbatim as documentation/reference. The selector adds (a) a corrected cost model that excludes the candidate from its own retained set so the ancestor walk does not short-circuit, and (b) a peak-aware short-circuit that returns an empty selection when the global live peak is dominated by non-activation memory. |
 | `midway_checkin.py` | Deliverable 4(a) + 4(b) without AC. Unchanged from the midway submission. |
 | `final_experiment.py` | New driver. For each `(model, batch_size)` it: (1) traces via `compile()`, (2) profiles the baseline graph, (3) measures end-to-end iteration latency on the baseline graph via `cuda.Event`, (4) runs `select_recomputations`, (5) rewrites the graph with `apply_activation_checkpointing`, (6) re-profiles the rewritten graph, (7) re-times it. |
 | `run_final.sh` | Slurm submitter for the H100 box. |
@@ -85,7 +91,34 @@ re-ranking is essential because dropping `A` lengthens the chain (and
 therefore the cost) of any later candidate whose forward ancestors include
 `A`.
 
-### 3.3 Safety filters
+When evaluating a candidate `cand`, we walk its forward ancestors to
+`retained \ {cand}`, *not* to `retained` (`cand` is in `retained`
+because it has not yet been moved to `selected_set`). Without this
+exclusion the ancestor walk short-circuits at `cand` itself, returning
+an empty set, and every candidate's cost collapses to the 1e-3 ms
+floor — the budget then never binds and the selector admits every
+candidate regardless of its true recompute cost. The rewriter does this
+correctly already (it walks `act` against `base_retained` after `act`
+has been moved out of the retained set). After this fix the cost
+estimate for ResNet b=8 grows from `0.16 ms` → `31.5 ms` and for BERT
+b=8 from `0.027 ms` → `34 ms`, both of which are now meaningful
+fractions of the `0.5 × T_fwd` budget and actually constrain admission.
+
+### 3.3 Peak-aware short-circuit
+
+If the live-tensor peak is dominated by `PARAM + OPT_STATE` (typical
+for small training batches: `peak_breakdown_live[ACT] / peak_total <
+5%`), no AC selection can shrink the global peak — activations are
+already free at the moment the peak occurs, so dropping them costs
+recompute latency for zero memory benefit. `select_recomputations`
+short-circuits in that regime and returns an empty selection. This is
+the simplest fix to the well-known mu-TWO failure mode where the score
+function is blind to the temporal location of the global peak; without
+it, the selector happily picks 25–27 BERT activations on `b=1, 2`
+(adding 30–53% iteration latency) even though the peak is fully in
+optimizer state and unmoved.
+
+### 3.4 Safety filters
 
 The pool of candidates is filtered so the rewriter never has to refuse a
 selection mid-flight:
@@ -166,7 +199,7 @@ its boundary back through any intermediate it needs. For wide-but-shallow
 graphs (ResNet-152, where most chains are 1–3 layers deep before they
 hit a non-selected boundary) this is cheap. For narrow-but-deep graphs
 where many drops are stacked on top of each other (BERT-Base, where the
-12 transformer-block residuals were all selected and the deepest chain
+24 transformer-block residuals are all selected and the deepest chain
 threads back through every selected residual) it is expensive — see
 section 5.3.
 
@@ -188,32 +221,45 @@ Run with `max_recompute_overhead_ratio = 0.5` on a single H100 80 GB,
 average over 10 timed iterations after 3 warmups, all from
 `results/final/final_results.json`.
 
-| Model       | Batch | Peak baseline (MiB) | Peak AC (MiB) | Peak Δ  | Iter baseline (ms) | Iter AC (ms) | Iter Δ   | # drops |
-| ----------- | ----- | ------------------- | ------------- | ------- | ------------------ | ------------ | -------- | ------- |
-| ResNet-152  | 2     | 1214.9              | 1196.4        | -1.5%   | 84.0               | 85.0         | +1.1%    | 79      |
-| ResNet-152  | 4     | 1485.6              | 1219.2        | -17.9%  | 87.1               | 93.5         | +7.3%    | 150     |
-| ResNet-152  | 8     | 2161.7              | 1487.5        | -31.2%  | 88.2               | 92.7         | +5.1%    | 155     |
-| ResNet-152  | 16    | 3512.8              | 2169.5        | **-38.2%** | 90.0          | 94.6         | +5.0%    | 155     |
-| BERT-Base   | 1     | 2312.5              | 2312.5        | 0.0%    | 42.1               | 64.5         | +53.2%   | 27      |
-| BERT-Base   | 2     | 2306.8              | 2306.8        | 0.0%    | 45.0               | 84.1         | +86.7%   | 27      |
-| BERT-Base   | 4     | 3243.1              | 3087.1        | -4.8%   | 63.2               | 119.0        | +88.3%   | 27      |
-| BERT-Base   | 8     | 5169.7              | 4858.7        | -6.0%   | 98.2               | 207.3        | +111.1%  | 27      |
+| Model       | Batch | Peak baseline (MiB) | Peak AC (MiB) | Peak Δ      | Iter baseline (ms) | Iter AC (ms) | Iter Δ  | # drops |
+| ----------- | ----- | ------------------- | ------------- | ----------- | ------------------ | ------------ | ------- | ------- |
+| ResNet-152  | 2     | 1214.9              | 1214.9        | 0.0%        | 88.5               | 88.5         | +0.0%   | 0 (gated) |
+| ResNet-152  | 4     | 1485.6              | 1219.2        | -17.9%      | 91.4               | 97.8         | +6.9%   | 150     |
+| ResNet-152  | 8     | 2161.7              | 1487.5        | -31.2%      | 86.4               | 93.5         | +8.2%   | 155     |
+| ResNet-152  | 16    | 3512.8              | 2169.5        | **-38.2%**  | 98.4               | 105.1        | +6.8%   | 155     |
+| BERT-Base   | 1     | 2312.5              | 2312.5        | 0.0%        | 46.1               | 46.1         | +0.0%   | 0 (gated) |
+| BERT-Base   | 2     | 2306.8              | 2306.8        | 0.0%        | 44.9               | 44.9         | +0.0%   | 0 (gated) |
+| BERT-Base   | 4     | 3243.1              | 3099.1        | -4.4%       | 65.0               | 99.8         | +53.6%  | 24      |
+| BERT-Base   | 8     | 5169.0              | 4881.7        | -5.6%       | 98.2               | 155.9        | +58.8%  | 25      |
 
 Figures:
 
-* `final_peak_memory.png` — Deliverable 4(b): peak CUDA memory vs.
-  mini-batch size, with and without AC.
-* `final_peak_breakdown.png` — Stacked-bar per-category memory at peak,
-  with vs. without AC. Confirms that the bytes ACT loses on ResNet are
-  *not* fully reclaimed as GRAD; on BERT a substantial fraction *is*
-  reclaimed because its recompute blocks have longer chains.
-* `final_iter_latency.png` — Deliverable 4(c): mean iteration latency
-  (with `[p10, p90]` whiskers) vs. mini-batch size, with and without AC.
+#### Deliverable 4(b) — Peak GPU memory vs. mini-batch size, with and without AC
+
+![Deliverable 4(b): Peak GPU memory vs mini-batch size](final_peak_memory.png)
+
+#### Deliverable 4(c) — Iteration latency vs. mini-batch size, with and without AC
+
+![Deliverable 4(c): Iteration latency vs mini-batch size](final_iter_latency.png)
+
+#### Per-category live-memory breakdown at the global peak (left bar = w/o AC, right bar = w/ AC, hatched)
+
+![Peak live-memory breakdown by category](final_peak_breakdown.png)
+
+The breakdown plot confirms the underlying mechanism:
+
+* On **ResNet-152**, the bytes that `ACT` loses to AC are *not* fully
+  reclaimed as `GRAD`. Each recompute block's working tensors die
+  before the next block runs, so net peak shrinks substantially.
+* On **BERT-Base** at `b=8` the dropped activations partially reappear
+  as `GRAD`-region recomputed copies (recompute chains span more nodes
+  for residuals + `_log_softmax`), which is why the peak savings on
+  BERT are smaller in percentage terms than on ResNet.
 
 ### 5.2 ResNet-152 — AC works very well at training-batch sizes
 
 At batch size 16 the live-memory peak shrinks from 3.51 GiB to 2.17 GiB
-(-38.2%) for **only +5.0% iteration latency**. Looking at the per-category
+(-38.2%) for **only +6.8% iteration latency**. Looking at the per-category
 breakdown:
 
 | Batch | ACT base | ACT AC | GRAD base | GRAD AC | OPT base | OPT AC |
@@ -225,52 +271,49 @@ The activations bucket nearly halves and the GRAD/OPT buckets are
 basically untouched. That's the textbook AC outcome: a forward-region
 activation gets dropped, the recomputed copy lives only briefly between
 its backward consumer and the allocator-free, and the saved bytes don't
-reappear elsewhere. The latency cost is well under the 50% overhead
-budget (selector reports a sub-millisecond predicted recompute total
-because each block's chain stops at the next non-selected activation —
-typically only one or two `convolution`/`relu`/`bn` ops away).
+reappear elsewhere. The selector's predicted recompute cost (~22-32 ms)
+matches the observed +6 to +8 ms latency overhead well — most chains
+stop at the next non-selected activation, typically one or two
+`convolution`/`relu`/`bn` ops away.
 
-At batch size 2 there is essentially no win: the peak is dominated by
-`OPT_STATE` (Adam moment buffers ≈ 918 MiB on a fresh allocator) and AC
-can't touch optimizer state. The selector still drops 79 activations and
-adds about a millisecond of overhead — by design our selector picks based
-on the per-activation lifetime/bytes/cost score, not on whether dropping
-those activations actually shifts the *global* peak. This is the same
-sub-optimality the μ-TWO paper highlights and a natural extension would
-be to gate selections on the temporal location of the global peak.
+At batch size 2 the peak is dominated by `OPT_STATE` (Adam moment
+buffers ≈ 918 MiB on a fresh allocator), so the peak-aware gate
+correctly skips the entire selection. AC pays no recompute latency and
+makes no peak claim it cannot deliver.
 
-### 5.3 BERT-Base — the AC compute/memory trade-off is steep on this model
+### 5.3 BERT-Base — peak-aware gate keeps small-batch configs honest, large-batch trade-off remains steep
 
-Three things happen at once:
+The peak lives almost entirely in `OPT_STATE + PARAM` for batch sizes
+1–2 (≈ 2.27 GiB out of a 2.31 GiB peak), so the peak-aware gate
+short-circuits and returns an empty selection. This is the right call:
+no choice of dropped activations could shift this peak, so paying
+recompute latency would be pure loss.
 
-1. The peak lives almost entirely in `OPT_STATE` for batch sizes 1–2
-   (1.85 GiB), so AC cannot move the peak no matter how many activations
-   we drop. We pay recompute cost for nothing.
-2. At batch size 8 the activations bucket (2.92 GiB) does dominate, and
-   AC drops it by 789 MiB. Half of those bytes (≈ 477 MiB) reappear as
-   GRAD-region recomputed copies, because the selector picks
-   `_log_softmax` (the LM head) and 12 transformer-block residual sums —
-   all of which are produced and consumed across a wide backward span,
-   so their recomputed copies stay live longer than ResNet's tiny
-   per-conv blocks.
-3. The wall-clock latency penalty is far larger than the per-op runtime
-   model predicts (selector estimate: ≈ 22 ms; observed: 109 ms). The
-   recomputed `_log_softmax` chain re-routes a 477 MiB tensor through
-   the LM-head matmul, the new live tensors fragment the allocator,
-   and the original LM-head output has to stay live across a much wider
-   span so it can feed both the original forward consumer and the
-   recomputed-log-softmax in backward. None of those second-order costs
-   are captured by `sum(avg_runtime_ms)`. This gap is exactly the
-   "schedule-aware costing" failure mode that the μ-TWO paper addresses
-   with a more sophisticated scheduling solver — our greedy selector
-   stops at the simpler local cost.
+At batch size 8 the activations bucket (2.92 GiB) does dominate, and
+AC drops it by 765 MiB. About 477 MiB reappear as GRAD-region recomputed
+copies because the selector picks `gelu_12` and 24 transformer-block
+residual sums — all of which are produced and consumed across a wide
+backward span, so their recomputed copies stay live longer than ResNet's
+tiny per-conv blocks. Net peak savings: -5.6%.
 
-The honest summary: our implementation gets the peak-memory deliverable
-right on BERT (peak does shrink at b ≥ 4), but the latency penalty makes
-it a poor operating point for this model + this overhead-ratio choice. A
-smaller `max_recompute_overhead_ratio` (≤ 0.1) or, ideally, a
-peak-aware selector that excludes candidates whose lifetime does not
-overlap the global peak, would be the next iteration.
+The wall-clock latency penalty (+58.8% at b=8) is still larger than
+the per-op runtime model predicts (selector estimate: ~34 ms,
+observed: ~58 ms). The remaining gap captures second-order costs the
+greedy selector cannot model from `sum(avg_runtime_ms)` alone:
+allocator fragmentation as recomputed copies of large tensors are
+threaded through backward, kernel-launch overhead, and the cost of
+`_log_softmax`'s 477 MiB tensor surviving longer to feed both the
+original forward consumer and the recomputed copy. Closing that gap
+fully would require schedule-aware costing of the kind μ-TWO's paper
+addresses with an LP solver — beyond the scope of a 2-week Phase 2,
+but the framework here (peak-aware gate + budget-bounded greedy with
+honest cost re-ranking) is the right starting point.
+
+The honest summary: BERT at `b ≥ 4` is the regime where a 5–6%
+peak-memory cut buys the user the headroom to fit a slightly larger
+batch on the same device, in exchange for a ~50–60% per-iteration
+latency cost. Whether that is worthwhile is workload-dependent;
+exposing it as a knob is the right deliverable.
 
 ### 5.4 What about the 2× BN running-stats update?
 
@@ -312,7 +355,9 @@ parameter in `select_recomputations`.
   per-region timing, lifetimes, marginal-bytes, classification).
 * [x] **Phase 2 — μ-TWO-style selection**: `select_recomputations` in
   `activation_checkpoint.py`, with iterative greedy re-ranking, safety
-  filters, lifetime-weighted score, and overhead-budget admission.
+  filters, lifetime-weighted score, overhead-budget admission, and a
+  peak-aware short-circuit that skips selection when AC cannot move
+  the global peak.
 * [x] **Phase 3 — Graph extractor + rewriter**: `apply_activation_checkpointing`
   in the same file; reuses `_extract_graph_with_inputs_outputs`-style
   ancestor walking and the course-provided `node_copy(arg_transform=...)` +

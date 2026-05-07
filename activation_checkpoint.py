@@ -4,6 +4,7 @@ import torch.fx as fx
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
+from graph_prof import NodeType
 from graph_tracer import SEPFunction
 
 
@@ -303,6 +304,7 @@ def select_recomputations(
     target_memory_savings_mib: Optional[float] = None,
     min_marginal_mib: float = 0.5,
     lifetime_weight: float = 1.0,
+    min_act_share_at_peak: float = 0.05,
 ) -> Dict[str, Any]:
     """Greedy mu-TWO-style selection of activations to drop and recompute.
 
@@ -330,12 +332,47 @@ def select_recomputations(
       - the cumulative recompute cost would exceed the overhead budget
         (`max_recompute_overhead_ratio * forward_runtime_ms`), or
       - the cumulative bytes saved exceeds `target_memory_savings_mib`.
+
+    Peak-awareness gate: if the activation bucket at the time of the
+    *global* peak is below `min_act_share_at_peak * peak_total`, the
+    global peak is dominated by non-activation memory (e.g. optimizer
+    state on small batches) and dropping activations cannot move it. We
+    skip selection entirely in that regime so we don't pay recompute
+    latency for zero peak-memory benefit. This is the simplest fix to
+    the well-known mu-TWO failure mode where the selector's score is
+    blind to the temporal location of the global peak.
     """
     placeholder_set: Set[fx.Node] = set(
         n for n in profiler.nodes if n.op == "placeholder"
     )
     all_acts: Set[fx.Node] = set(profiler.activation_nodes)
     safe_acts = [a for a in all_acts if _is_safe_to_recompute(a, profiler)]
+
+    # Peak-aware short-circuit: if the global live peak is overwhelmingly
+    # PARAM+OPT_STATE (typical at small training batches), no AC selection
+    # can shrink the global peak. Skip selection so we don't pay recompute
+    # latency for nothing.
+    peak_total_bytes = float(getattr(profiler, "avg_peak_total_bytes", 0.0))
+    peak_act_bytes_dict = getattr(profiler, "avg_peak_by_type_bytes", {}) or {}
+    peak_act_bytes = float(peak_act_bytes_dict.get(NodeType.ACT, 0.0))
+    peak_act_share = (
+        peak_act_bytes / peak_total_bytes if peak_total_bytes > 0 else 0.0
+    )
+    if peak_total_bytes > 0 and peak_act_share < min_act_share_at_peak:
+        return {
+            "selected": [],
+            "total_bytes_saved": 0,
+            "total_bytes_saved_mib": 0.0,
+            "total_recompute_ms": 0.0,
+            "overhead_budget_ms": max_recompute_overhead_ratio
+            * max(_forward_runtime_ms(profiler), 1e-6),
+            "forward_runtime_ms": _forward_runtime_ms(profiler),
+            "n_safe_candidates": len(safe_acts),
+            "n_skipped_unsafe_chain": 0,
+            "n_skipped_too_small": 0,
+            "skipped_peak_not_activation_bound": True,
+            "peak_act_share": peak_act_share,
+        }
 
     target_bytes = (
         int(target_memory_savings_mib * 1024 * 1024)
@@ -378,13 +415,30 @@ def select_recomputations(
     # it correctly attributes the cost of an expensive shared op
     # (e.g. a vocab-projection addmm in BERT) to *every* candidate whose
     # chain crosses it after we drop the in-between activations.
+    #
+    # IMPORTANT: when we evaluate candidate `cand`, we are asking "what would
+    # it cost to recompute `cand` if I dropped it?", so `cand` itself must
+    # NOT be in the retained set during the ancestor walk. Otherwise
+    # `_forward_ancestors_to_retained` short-circuits at `cand` and returns
+    # an empty set, making every candidate's cost equal to the 1e-3 ms
+    # floor. (The rewriter handles this correctly because by the time it
+    # runs, all selected activations are in `selected_set` and therefore
+    # not in `base_retained`.)
     candidates: Set[fx.Node] = set(candidate_meta.keys())
     while candidates:
-        retained = placeholder_set | (all_acts - selected_set)
+        retained_base = placeholder_set | (all_acts - selected_set)
         best: Optional[Tuple[fx.Node, int, float, float, int]] = None
         unsafe_now: List[fx.Node] = []
         for cand in candidates:
-            ancestors = _forward_ancestors_to_retained(cand, retained, profiler)
+            # Treat `cand` as "about to be dropped" so the walk traverses
+            # its own producer + ancestors back to the rest of the
+            # retained set. The ancestor set returned therefore *includes*
+            # `cand` itself, which is the right cost-accounting unit (the
+            # rewriter copies `cand` into its recompute block).
+            retained_for_cand = retained_base - {cand}
+            ancestors = _forward_ancestors_to_retained(
+                cand, retained_for_cand, profiler
+            )
             if any(
                 a.op == "call_function" and _is_unsafe_target(a)
                 for a in ancestors
