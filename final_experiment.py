@@ -43,9 +43,10 @@ from midway_checkin import (
     _validate_profile_summary,
 )
 
-OUTPUT_DIR = os.path.join(
+OUTPUT_DIR = os.environ.get("CS265_OUTPUT_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "results", "final"
 )
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 DEFAULT_OVERHEAD_RATIO = 0.5
 
 
@@ -164,6 +165,13 @@ def _profile_graph(
     return profiler
 
 
+def _is_oom(exc: BaseException) -> bool:
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg
+
+
 def _run_one_setting(
     train_step_fn: Any,
     model: torch.nn.Module,
@@ -178,8 +186,14 @@ def _run_one_setting(
     """Compile + (optionally) AC-rewrite + profile + time, all inside the
     `compile()` `graph_transformation` callback so we use the same tracing
     path as the starter pipeline.
+
+    Each GPU-touching phase is wrapped in its own try/except OOM so a single
+    OOM in baseline doesn't lose the AC sub-trial (and vice versa). The
+    returned bag may have any subset of `baseline_profile`,
+    `baseline_iter_latency`, `ac_profile`, `ac_iter_latency` populated, plus
+    `oom_phases` listing which phases failed.
     """
-    bag: Dict[str, Any] = {"applied_ac": apply_ac}
+    bag: Dict[str, Any] = {"applied_ac": apply_ac, "oom_phases": []}
 
     def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
         placeholder_types = _infer_placeholder_node_types(
@@ -187,13 +201,30 @@ def _run_one_setting(
         )
 
         # 1. Profile baseline graph.
-        baseline_profiler = _profile_graph(
-            gm, args, placeholder_types, warmup_iters, profile_iters
-        )
-        bag["baseline_profile"] = _build_profile_summary(baseline_profiler)
+        baseline_profiler: Any = None
+        try:
+            baseline_profiler = _profile_graph(
+                gm, args, placeholder_types, warmup_iters, profile_iters
+            )
+            bag["baseline_profile"] = _build_profile_summary(baseline_profiler)
+        except Exception as e:
+            if _is_oom(e):
+                bag["oom_phases"].append("baseline_profile")
+                torch.cuda.empty_cache()
+                # If baseline profile failed we cannot select recomputations,
+                # so AC is impossible; bail.
+                return gm
+            raise
 
         # 2. End-to-end iteration latency on baseline graph (CUDA events).
-        bag["baseline_iter_latency"] = _measure_iter_latency_ms(gm, args)
+        try:
+            bag["baseline_iter_latency"] = _measure_iter_latency_ms(gm, args)
+        except Exception as e:
+            if _is_oom(e):
+                bag["oom_phases"].append("baseline_iter_latency")
+                torch.cuda.empty_cache()
+            else:
+                raise
 
         if not apply_ac:
             return gm
@@ -218,7 +249,8 @@ def _run_one_setting(
         if not info["selected"]:
             # Nothing to do; AC is a no-op.
             bag["ac_profile"] = bag["baseline_profile"]
-            bag["ac_iter_latency"] = bag["baseline_iter_latency"]
+            if "baseline_iter_latency" in bag:
+                bag["ac_iter_latency"] = bag["baseline_iter_latency"]
             return gm
 
         # 4. Phase 3 rewrite.
@@ -226,18 +258,42 @@ def _run_one_setting(
         bag["rewritten_graph_node_count"] = len(list(new_gm.graph.nodes))
 
         # 5. Re-profile the rewritten graph.
-        ac_profiler = _profile_graph(
-            new_gm, args, placeholder_types, warmup_iters, profile_iters
-        )
-        bag["ac_profile"] = _build_profile_summary(ac_profiler)
+        try:
+            ac_profiler = _profile_graph(
+                new_gm, args, placeholder_types, warmup_iters, profile_iters
+            )
+            bag["ac_profile"] = _build_profile_summary(ac_profiler)
+        except Exception as e:
+            if _is_oom(e):
+                bag["oom_phases"].append("ac_profile")
+                torch.cuda.empty_cache()
+                return new_gm
+            raise
 
         # 6. End-to-end iteration latency on rewritten graph.
-        bag["ac_iter_latency"] = _measure_iter_latency_ms(new_gm, args)
+        try:
+            bag["ac_iter_latency"] = _measure_iter_latency_ms(new_gm, args)
+        except Exception as e:
+            if _is_oom(e):
+                bag["oom_phases"].append("ac_iter_latency")
+                torch.cuda.empty_cache()
+            else:
+                raise
 
         return new_gm
 
     compiled_fn = compile(train_step_fn, graph_transformation)
-    compiled_fn(model, optimizer, example_inputs)
+    try:
+        compiled_fn(model, optimizer, example_inputs)
+    except Exception as e:
+        if _is_oom(e):
+            # Tracing/initial run OOM-ed before graph_transformation could
+            # complete, or graph_transformation re-raised an OOM we didn't
+            # catch (e.g. a CPU-side OOM from FX). Mark the trial.
+            bag["oom_phases"].append("tracing_or_runtime")
+            torch.cuda.empty_cache()
+        else:
+            raise
     return bag
 
 
@@ -249,41 +305,60 @@ def _safe_one_setting(
     apply_ac: bool,
     overhead_ratio: float,
 ) -> Dict[str, Any]:
-    """Build inputs fresh and run one (model, batch_size, ac?) trial."""
-    if model_name == "ResNet-152":
-        model, optimizer, example_inputs, train_step = _build_resnet152_inputs(
-            batch_size=batch_size, device=device
-        )
-    elif model_name == "BERT-Base":
-        model, optimizer, example_inputs, train_step = _build_bert_inputs(
-            batch_size=batch_size, device=device
-        )
-    else:
-        raise ValueError(f"unknown model {model_name!r}")
+    """Build inputs fresh and run one (model, batch_size, ac?) trial. Any
+    OOM during input construction (e.g. very large batches that can't even
+    allocate the inputs) is caught and recorded as an `oom_phases` entry so
+    the sweep can keep going.
+    """
+    bag: Dict[str, Any] = {
+        "model_name": model_name,
+        "batch_size": batch_size,
+        "applied_ac": apply_ac,
+        "oom_phases": [],
+    }
+    model = optimizer = example_inputs = train_step = None
+    try:
+        if model_name == "ResNet-152":
+            model, optimizer, example_inputs, train_step = _build_resnet152_inputs(
+                batch_size=batch_size, device=device
+            )
+        elif model_name == "BERT-Base":
+            model, optimizer, example_inputs, train_step = _build_bert_inputs(
+                batch_size=batch_size, device=device
+            )
+        else:
+            raise ValueError(f"unknown model {model_name!r}")
 
-    _init_optimizer_states(model, optimizer)
-    bag = _run_one_setting(
-        train_step,
-        model,
-        optimizer,
-        example_inputs,
-        apply_ac=apply_ac,
-        overhead_ratio=overhead_ratio,
-    )
-    bag["model_name"] = model_name
-    bag["batch_size"] = batch_size
-
-    # Validate profiles' internal consistency exactly like the midway runner.
-    if "baseline_profile" in bag:
-        _validate_profile_summary(model_name, batch_size, bag["baseline_profile"])
-    if "ac_profile" in bag:
-        _validate_profile_summary(
-            model_name + " (w/ AC)", batch_size, bag["ac_profile"]
+        _init_optimizer_states(model, optimizer)
+        run_bag = _run_one_setting(
+            train_step,
+            model,
+            optimizer,
+            example_inputs,
+            apply_ac=apply_ac,
+            overhead_ratio=overhead_ratio,
         )
-
-    # Tear down between trials so the CUDA allocator returns to a clean state.
-    del model, optimizer, example_inputs, train_step
-    torch.cuda.empty_cache()
+        # Merge oom_phases from inner run_bag into outer bag, then update the
+        # rest of the keys.
+        run_oom = run_bag.pop("oom_phases", [])
+        bag["oom_phases"].extend(run_oom)
+        bag.update(run_bag)
+    except Exception as e:
+        if _is_oom(e):
+            bag["oom_phases"].append("input_construction_or_init")
+        else:
+            raise
+    finally:
+        # Validate profiles' internal consistency exactly like the midway runner.
+        if "baseline_profile" in bag:
+            _validate_profile_summary(model_name, batch_size, bag["baseline_profile"])
+        if "ac_profile" in bag:
+            _validate_profile_summary(
+                model_name + " (w/ AC)", batch_size, bag["ac_profile"]
+            )
+        # Tear down between trials so the CUDA allocator returns to a clean state.
+        del model, optimizer, example_inputs, train_step
+        torch.cuda.empty_cache()
     return bag
 
 
@@ -291,10 +366,28 @@ def _safe_one_setting(
 # Plotting
 # ---------------------------------------------------------------------------
 
+def _peak_pair(row: Dict[str, Any]) -> Tuple[Any, Any]:
+    base = row.get("baseline_profile", {}).get("peak_cuda_mib")
+    ac = row.get("ac_profile", {}).get("peak_cuda_mib")
+    return base, ac
+
+
+def _lat_pair(row: Dict[str, Any]) -> Tuple[Any, Any]:
+    base_lat = row.get("baseline_iter_latency", {})
+    ac_lat = row.get("ac_iter_latency", {})
+    return (
+        base_lat.get("mean_ms") if base_lat else None,
+        ac_lat.get("mean_ms") if ac_lat else None,
+    )
+
+
 def _plot_peak_memory_with_without_ac(
     results: Dict[str, List[Dict[str, Any]]], out_path: str
 ) -> None:
-    """Deliverable 4(b): Peak-memory vs mini-batch-size, with vs. without AC."""
+    """Deliverable 4(b): Peak-memory vs mini-batch-size, with vs. without AC.
+    Bars for OOM trials are drawn at zero with an "OOM" label so the failure
+    point is visible alongside the success points.
+    """
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), dpi=160)
     for ax_idx, model_name in enumerate(["ResNet-152", "BERT-Base"]):
         rows = results.get(model_name, [])
@@ -302,21 +395,49 @@ def _plot_peak_memory_with_without_ac(
             continue
         ax = axes[ax_idx]
         batch_sizes = [r["batch_size"] for r in rows]
-        peak_no_ac = [r["baseline_profile"]["peak_cuda_mib"] for r in rows]
-        peak_ac = [
-            r.get("ac_profile", r["baseline_profile"])["peak_cuda_mib"]
-            for r in rows
-        ]
+        peaks = [_peak_pair(r) for r in rows]
+        peak_no_ac = [p[0] if p[0] is not None else 0.0 for p in peaks]
+        peak_ac = [p[1] if p[1] is not None else 0.0 for p in peaks]
+        no_ac_oom = [p[0] is None for p in peaks]
+        ac_oom = [p[1] is None for p in peaks]
+
         x = np.arange(len(batch_sizes))
         bar_w = 0.4
         ax.bar(x - bar_w / 2, peak_no_ac, width=bar_w, label="w/o AC", color="#4C78A8")
         ax.bar(x + bar_w / 2, peak_ac, width=bar_w, label="w/ AC", color="#F58518")
-        for i, (a, b) in enumerate(zip(peak_no_ac, peak_ac)):
-            if a > 0:
+
+        max_peak = max(
+            [v for v in peak_no_ac + peak_ac if isinstance(v, (int, float))] + [1.0]
+        )
+        # Annotate per-batch
+        for i, (no, ac, no_oom, a_oom) in enumerate(
+            zip(peak_no_ac, peak_ac, no_ac_oom, ac_oom)
+        ):
+            if no_oom:
+                ax.text(
+                    i - bar_w / 2,
+                    max_peak * 0.02,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
+            if a_oom:
                 ax.text(
                     i + bar_w / 2,
-                    b + max(peak_no_ac) * 0.01,
-                    f"-{(a - b) / a * 100:.0f}%",
+                    max_peak * 0.02,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
+            elif (not no_oom) and no > 0:
+                ax.text(
+                    i + bar_w / 2,
+                    ac + max_peak * 0.01,
+                    f"-{(no - ac) / no * 100:.0f}%",
                     ha="center",
                     fontsize=8,
                     color="#444",
@@ -373,13 +494,18 @@ def _plot_peak_breakdown_with_without_ac(
         bottoms_ac = np.zeros(n)
         for key, pretty in categories:
             vals_no_ac = np.array(
-                [r["baseline_profile"]["peak_breakdown_live_mib"].get(key, 0.0) for r in rows]
+                [
+                    r.get("baseline_profile", {})
+                    .get("peak_breakdown_live_mib", {})
+                    .get(key, 0.0)
+                    for r in rows
+                ]
             )
             vals_ac = np.array(
                 [
-                    r.get("ac_profile", r["baseline_profile"])[
-                        "peak_breakdown_live_mib"
-                    ].get(key, 0.0)
+                    r.get("ac_profile", {})
+                    .get("peak_breakdown_live_mib", {})
+                    .get(key, 0.0)
                     for r in rows
                 ]
             )
@@ -401,6 +527,32 @@ def _plot_peak_breakdown_with_without_ac(
             )
             bottoms_no_ac = bottoms_no_ac + vals_no_ac
             bottoms_ac = bottoms_ac + vals_ac
+
+        # Mark OOM trials so missing bars don't read as "no memory used".
+        max_total = max(
+            [float(b) for b in list(bottoms_no_ac) + list(bottoms_ac)] + [1.0]
+        )
+        for i, r in enumerate(rows):
+            if "baseline_profile" not in r:
+                ax.text(
+                    no_ac_x[i],
+                    max_total * 0.03,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
+            if "ac_profile" not in r:
+                ax.text(
+                    ac_x[i],
+                    max_total * 0.03,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
 
         ax.set_xticks(x)
         ax.set_xticklabels([str(r["batch_size"]) for r in rows])
@@ -429,28 +581,33 @@ def _plot_iter_latency_with_without_ac(
             continue
         ax = axes[ax_idx]
         batch_sizes = [r["batch_size"] for r in rows]
-        no_ac_mean = [r["baseline_iter_latency"]["mean_ms"] for r in rows]
-        ac_mean = [
-            r.get("ac_iter_latency", r["baseline_iter_latency"])["mean_ms"] for r in rows
-        ]
-        no_ac_p10 = [r["baseline_iter_latency"]["p10_ms"] for r in rows]
-        no_ac_p90 = [r["baseline_iter_latency"]["p90_ms"] for r in rows]
-        ac_p10 = [
-            r.get("ac_iter_latency", r["baseline_iter_latency"])["p10_ms"] for r in rows
-        ]
-        ac_p90 = [
-            r.get("ac_iter_latency", r["baseline_iter_latency"])["p90_ms"] for r in rows
-        ]
+
+        def _series(rows: List[Dict[str, Any]], key: str, sub: str) -> List[float]:
+            out: List[float] = []
+            for r in rows:
+                v = r.get(key, {})
+                out.append(float(v[sub]) if v and sub in v else 0.0)
+            return out
+
+        no_ac_mean = _series(rows, "baseline_iter_latency", "mean_ms")
+        ac_mean = _series(rows, "ac_iter_latency", "mean_ms")
+        no_ac_p10 = _series(rows, "baseline_iter_latency", "p10_ms")
+        no_ac_p90 = _series(rows, "baseline_iter_latency", "p90_ms")
+        ac_p10 = _series(rows, "ac_iter_latency", "p10_ms")
+        ac_p90 = _series(rows, "ac_iter_latency", "p90_ms")
+        no_ac_oom = [r.get("baseline_iter_latency") is None for r in rows]
+        ac_oom = [r.get("ac_iter_latency") is None for r in rows]
+
         x = np.arange(len(batch_sizes))
         bar_w = 0.4
 
         no_ac_err = [
-            [m - lo for m, lo in zip(no_ac_mean, no_ac_p10)],
-            [hi - m for m, hi in zip(no_ac_mean, no_ac_p90)],
+            [max(m - lo, 0) for m, lo in zip(no_ac_mean, no_ac_p10)],
+            [max(hi - m, 0) for m, hi in zip(no_ac_mean, no_ac_p90)],
         ]
         ac_err = [
-            [m - lo for m, lo in zip(ac_mean, ac_p10)],
-            [hi - m for m, hi in zip(ac_mean, ac_p90)],
+            [max(m - lo, 0) for m, lo in zip(ac_mean, ac_p10)],
+            [max(hi - m, 0) for m, hi in zip(ac_mean, ac_p90)],
         ]
         ax.bar(
             x - bar_w / 2,
@@ -470,11 +627,34 @@ def _plot_iter_latency_with_without_ac(
             color="#F58518",
             capsize=3,
         )
-        for i, (a, b) in enumerate(zip(no_ac_mean, ac_mean)):
-            if a > 0:
+        max_lat = max(no_ac_mean + ac_mean + [1.0])
+        for i, (a, b, no_oom, a_oom) in enumerate(
+            zip(no_ac_mean, ac_mean, no_ac_oom, ac_oom)
+        ):
+            if no_oom:
+                ax.text(
+                    i - bar_w / 2,
+                    max_lat * 0.02,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
+            if a_oom:
                 ax.text(
                     i + bar_w / 2,
-                    b + max(no_ac_mean) * 0.02,
+                    max_lat * 0.02,
+                    "OOM",
+                    ha="center",
+                    fontsize=8,
+                    color="#a00",
+                    fontweight="bold",
+                )
+            elif (not no_oom) and a > 0:
+                ax.text(
+                    i + bar_w / 2,
+                    b + max_lat * 0.02,
                     f"+{(b - a) / a * 100:.0f}%",
                     ha="center",
                     fontsize=8,
@@ -511,8 +691,16 @@ def run_final_experiment(
     torch.manual_seed(0)
 
     configs = [
-        FinalExperimentConfig(model_name="ResNet-152", batch_sizes=[2, 4, 8, 16]),
-        FinalExperimentConfig(model_name="BERT-Base", batch_sizes=[1, 2, 4, 8]),
+        # Pushed beyond the comfortable memory range so we can show both the
+        # AC sweet spot AND the regime where baseline OOMs but AC fits.
+        FinalExperimentConfig(
+            model_name="ResNet-152",
+            batch_sizes=[2, 4, 8, 16, 32, 64, 128, 256],
+        ),
+        FinalExperimentConfig(
+            model_name="BERT-Base",
+            batch_sizes=[1, 2, 4, 8, 16, 32, 64, 128],
+        ),
     ]
 
     all_results: Dict[str, List[Dict[str, Any]]] = {
@@ -537,19 +725,34 @@ def run_final_experiment(
                 overhead_ratio=overhead_ratio,
             )
             elapsed = time.time() - t0
-            no_ac_peak = row["baseline_profile"]["peak_cuda_mib"]
-            ac_peak = row.get("ac_profile", row["baseline_profile"])["peak_cuda_mib"]
-            no_ac_lat = row["baseline_iter_latency"]["mean_ms"]
-            ac_lat = row.get("ac_iter_latency", row["baseline_iter_latency"])["mean_ms"]
+            oom_phases = row.get("oom_phases", [])
+
+            base_peak = row.get("baseline_profile", {}).get("peak_cuda_mib")
+            ac_peak = row.get("ac_profile", {}).get("peak_cuda_mib")
+            base_lat = row.get("baseline_iter_latency", {}).get("mean_ms")
+            ac_lat = row.get("ac_iter_latency", {}).get("mean_ms")
             n_sel = row.get("selection", {}).get("n_selected", 0)
+
+            def _fmt(v: Any, suf: str = "") -> str:
+                return f"{v:.1f}{suf}" if isinstance(v, (int, float)) else "OOM"
+
+            peak_str = (
+                f"{_fmt(base_peak)}->{_fmt(ac_peak)} MiB"
+                if base_peak is not None or ac_peak is not None
+                else "OOM"
+            )
+            lat_str = (
+                f"{_fmt(base_lat)}->{_fmt(ac_lat)} ms"
+                if base_lat is not None or ac_lat is not None
+                else "OOM"
+            )
+            oom_str = (
+                f" oom={','.join(oom_phases)}" if oom_phases else ""
+            )
             print(
                 f"[ok ] {cfg.model_name} batch={batch_size} "
-                f"selected={n_sel} "
-                f"peak {no_ac_peak:.1f}->{ac_peak:.1f} MiB "
-                f"({(ac_peak - no_ac_peak) / max(no_ac_peak, 1e-9) * 100:+.1f}%), "
-                f"latency {no_ac_lat:.1f}->{ac_lat:.1f} ms "
-                f"({(ac_lat - no_ac_lat) / max(no_ac_lat, 1e-9) * 100:+.1f}%)  "
-                f"[{elapsed:.1f}s]",
+                f"selected={n_sel} peak {peak_str} latency {lat_str}"
+                f"{oom_str}  [{elapsed:.1f}s]",
                 flush=True,
             )
             all_results[cfg.model_name].append(row)
